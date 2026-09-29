@@ -1,0 +1,9 @@
+/config/local.php
+/storage/*.log
+/storage/sessions/
+/.phpunit.cache/
+/.idea/
+/.vscode/
+*.zip
+*.tar.gz
+
