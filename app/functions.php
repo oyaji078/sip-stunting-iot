@@ -178,22 +178,35 @@ function rfid_scan_modal(): string
 HTML;
 }
 
+/**
+ * Identitas Posyandu untuk judul halaman, sidebar, dan halaman masuk.
+ * Nilai bawaan ada di kode; bisa ditimpa lewat config app.brand_name / app.brand_place.
+ */
+function app_brand(): array
+{
+    global $config;
+    $name = trim((string)($config['app']['brand_name'] ?? '')) ?: 'Posyandu Ingin Sehat';
+    $place = trim((string)($config['app']['brand_place'] ?? '')) ?: 'Dusun Dames Borneo';
+    return ['name' => $name, 'place' => $place, 'initial' => mb_strtoupper(mb_substr($name, 0, 1))];
+}
+
 function render(string $title, callable $content, string $active = ''): void
 {
     global $config;
+    $brand = app_brand();
     $user = current_user();
     $flashes = pull_flashes();
     ?><!doctype html>
 <html lang="id"><head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title><?= e($title) ?> · <?= e($config['app']['name']) ?></title>
+    <title><?= e($title) ?> · <?= e($brand['name']) ?> <?= e($brand['place']) ?></title>
     <link rel="stylesheet" href="<?= e(url('assets/vendor/bootstrap.min.css')) ?>">
     <link rel="stylesheet" href="<?= e(asset_url('assets/app.css')) ?>">
 </head><body>
 <?php if ($user): ?>
 <div class="app-shell">
 <aside class="sidebar">
-    <a class="brand" href="<?= e(url()) ?>"><span class="brand-mark">S</span><span><b>SIP Stunting</b><small>IoT Posyandu</small></span></a>
+    <a class="brand" href="<?= e(url()) ?>"><span class="brand-mark"><?= e($brand['initial']) ?></span><span class="brand-text"><b><?= e($brand['name']) ?></b><small><?= e($brand['place']) ?></small></span></a>
     <nav><?php foreach ([
         '' => ['Dashboard','bi-grid'], 'balita' => ['Data Balita','bi-people'], 'pemeriksaan' => ['Pemeriksaan','bi-clipboard2-pulse'],
         'laporan' => ['Laporan','bi-file-earmark-bar-graph'], 'alat' => ['Alat IoT','bi-router'],
