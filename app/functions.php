@@ -99,13 +99,46 @@ function normalize_uid(string $uid): string
     return implode(':', str_split($hex, 2));
 }
 
-function device_status(?string $lastSeen): array
+/**
+ * Status online/offline dihitung dari selisih detik yang berasal dari jam
+ * database (TIMESTAMPDIFF terhadap NOW()), bukan dari jam PHP. Ini menghindari
+ * bug ketika timezone server MySQL berbeda dengan timezone aplikasi sehingga
+ * perangkat yang baru saja heartbeat (HTTP 200) tetap tampil "Offline".
+ */
+function device_status(?int $secondsAgo): array
 {
-    if (!$lastSeen) {
+    if ($secondsAgo === null) {
         return ['Belum aktif', 'secondary'];
     }
-    $online = time() - strtotime($lastSeen) <= 90;
-    return $online ? ['Online', 'success'] : ['Offline', 'danger'];
+    return $secondsAgo <= 90 ? ['Online', 'success'] : ['Offline', 'danger'];
+}
+
+function time_ago(?int $seconds): string
+{
+    if ($seconds === null) {
+        return 'Belum pernah';
+    }
+    if ($seconds < 0) {
+        $seconds = 0;
+    }
+    if ($seconds < 60) {
+        return $seconds . ' detik lalu';
+    }
+    if ($seconds < 3600) {
+        return intdiv($seconds, 60) . ' menit lalu';
+    }
+    if ($seconds < 86400) {
+        return intdiv($seconds, 3600) . ' jam lalu';
+    }
+    return intdiv($seconds, 86400) . ' hari lalu';
+}
+
+function rfid_scan_modal(): string
+{
+    $scanUrl = e(url('rfid/scan'));
+    return <<<HTML
+<div class="modal fade" id="rfidModal" tabindex="-1" data-scan-url="{$scanUrl}"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Tempelkan kartu RFID</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body text-center"><div class="rfid-wait" data-rfid-icon>⌁</div><p class="mb-1" data-rfid-status>Silakan tempelkan kartu RFID pada alat…</p><small class="text-muted">Alat harus online dan terhubung ke internet.</small></div></div></div></div>
+HTML;
 }
 
 function render(string $title, callable $content, string $active = ''): void

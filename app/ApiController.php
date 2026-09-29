@@ -76,19 +76,40 @@ final class ApiController
         if (!$child) {
             $stmt = $this->pdo->prepare('INSERT INTO unknown_rfid_scans (rfid_uid, device_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE scan_count = scan_count + 1, last_scanned_at = NOW()');
             $stmt->execute([$uid, $this->device['id']]);
+            $this->recordScan($uid, 'unknown', null);
             json_response(['status' => 'unknown', 'uid' => $uid], 404);
         }
         if (!(bool)$child['is_active']) {
+            $this->recordScan($uid, 'inactive', (int)$child['id']);
             json_response(['status' => 'inactive', 'message' => 'Data balita tidak aktif.'], 409);
         }
         $today = date('Y-m-d');
         if (!GrowthService::isEligible($child['birth_date'], $today)) {
+            $this->recordScan($uid, 'ineligible', (int)$child['id']);
             json_response(['status' => 'ineligible', 'message' => 'Usia balita harus 24 sampai kurang dari 60 bulan.'], 422);
         }
+        $this->recordScan($uid, 'registered', (int)$child['id']);
         json_response(['status' => 'registered', 'child' => [
             'name' => $child['name'], 'sex' => $child['sex'],
             'birth_date' => $child['birth_date'], 'age_days' => GrowthService::ageInDays($child['birth_date'], $today),
         ]]);
+    }
+
+    /**
+     * Simpan setiap tap RFID agar operator bisa "tempel RFID" dari web
+     * (pendaftaran balita & pemilihan balita saat pemeriksaan). Dibungkus
+     * try/catch supaya lookup perangkat tetap jalan bila tabel rfid_scans
+     * belum dibuat (setup belum dijalankan ulang).
+     */
+    private function recordScan(string $uid, string $outcome, ?int $childId): void
+    {
+        try {
+            $stmt = $this->pdo->prepare('INSERT INTO rfid_scans (device_id, rfid_uid, outcome, child_id) VALUES (?, ?, ?, ?)');
+            $stmt->execute([$this->device['id'], $uid, $outcome, $childId]);
+            $this->pdo->exec('DELETE FROM rfid_scans WHERE scanned_at < DATE_SUB(NOW(), INTERVAL 1 DAY)');
+        } catch (Throwable $e) {
+            // Tabel belum ada atau gagal menulis: abaikan, jangan ganggu alur perangkat.
+        }
     }
 
     private function measurement(array $payload): never
