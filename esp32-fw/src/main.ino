@@ -1230,7 +1230,7 @@ void showZScoreResult()
     finalCategory
   );
 
-  beepLong();
+  beepSuccess();
 
   // Hasil Z-Score tetap ditampilkan
   delay(5000);
@@ -1315,7 +1315,7 @@ void showFinish()
   lcdPrintLine(2, "");
   lcdPrintLine(3, "Silakan turun...");
 
-  beepLong();
+  beepSuccess();
 
   // Jangan langsung kembali standby.
   // Sistem menunggu anak turun dari timbangan.
@@ -1409,7 +1409,7 @@ void showCaptureDone()
   lcdPrintLine(2, "Dikirim ke website");
   lcdPrintLine(3, "Lanjutkan di web");
 
-  beepDouble();
+  beepSuccess();
   delay(2500);
 }
 
@@ -1438,7 +1438,7 @@ void showUnknownRFID()
     "Belum Terdaftar"
   );
 
-  beepDouble();
+  beepError();
 
   delay(2500);
 
@@ -1482,7 +1482,7 @@ void showRegisteredRFID()
     "Data ditemukan"
   );
 
-  beepShort();
+  beepSuccess();
 
   delay(2500);
 }
@@ -1755,6 +1755,11 @@ void setup()
   Serial.println(
     "SISTEM SIAP"
   );
+
+  if (rfidReady && scaleReady && tofReady && lcdReady)
+    beepSuccess();
+  else
+    beepError();
 }
 
 // =============================================================
