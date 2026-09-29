@@ -1547,6 +1547,15 @@ void initHX711()
 // INISIALISASI DAN PEMULIHAN RFID RC522
 // =============================================================
 
+bool isRFIDVersionValid(byte version)
+{
+  return version == 0x12 || // chip counterfeit yang umum
+         version == 0x88 || // clone FM17522
+         version == 0x90 || // MFRC522 v0.0
+         version == 0x91 || // MFRC522 v1.0
+         version == 0x92;   // MFRC522 v2.0
+}
+
 bool initRFID()
 {
   // Pastikan chip-select tidak aktif ketika bus SPI mulai. Beberapa modul
@@ -1554,8 +1563,10 @@ bool initRFID()
   pinMode(RFID_SS, OUTPUT);
   digitalWrite(RFID_SS, HIGH);
   pinMode(RFID_RST, OUTPUT);
+  digitalWrite(RFID_RST, LOW);
+  delay(10);
   digitalWrite(RFID_RST, HIGH);
-  delay(50);
+  delay(100);
 
   SPI.begin(
     RFID_SCK,
@@ -1570,8 +1581,9 @@ bool initRFID()
   byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
   Serial.printf("RFID RC522 VersionReg: 0x%02X\n", version);
 
-  // 0x00/0xFF berarti ESP32 tidak menerima jawaban dari RC522.
-  if (version == 0x00 || version == 0xFF)
+  // Hanya nilai versi RC522 yang dikenal boleh dianggap siap. Nilai acak
+  // seperti 0xFE juga menandakan MISO/SS mengambang atau komunikasi gagal.
+  if (!isRFIDVersionValid(version))
   {
     Serial.println("RFID RC522 tidak terdeteksi - periksa 3.3V dan kabel SPI");
     return false;
@@ -1593,7 +1605,7 @@ void recoverRFIDIfNeeded()
 
   lastRFIDHealthCheckAt = millis();
   byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
-  if (version == 0x00 || version == 0xFF)
+  if (!isRFIDVersionValid(version))
   {
     Serial.println("Komunikasi RFID terputus, mencoba inisialisasi ulang...");
     initRFID();
