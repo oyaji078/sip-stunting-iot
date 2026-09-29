@@ -4,6 +4,7 @@ const chart=document.querySelector('#categoryChart');
 if(chart&&window.Chart){const rows=JSON.parse(chart.dataset.values||'[]');const colors={'Sangat Pendek':'#9f2632','Pendek/Stunting':'#e36d48','Normal':'#238a70','Tinggi':'#4a8eb0'};new Chart(chart,{type:'doughnut',data:{labels:rows.map(x=>x.category),datasets:[{data:rows.map(x=>x.total),backgroundColor:rows.map(x=>colors[x.category]||'#ccc'),borderWidth:0}]},options:{cutout:'70%',plugins:{legend:{position:'bottom',labels:{boxWidth:10,usePointStyle:true}}}}})}
 document.querySelector('#voidModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
 document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
+document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.getOrCreateInstance(el).show());
 
 // Tempel RFID: minta tempel kartu di alat, lalu isi form dari scan terbaru.
 (function(){
@@ -15,7 +16,7 @@ document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.t
   const scanUrl=modalEl.dataset.scanUrl;
   const modeUrl=modalEl.dataset.modeUrl;
   const csrf=modalEl.dataset.csrf;
-  let timer=null,baseId=null,mode=null,target=null,captureActive=false;
+  let timer=null,baseId=null,mode=null,target=null,captureActive=false,returnModalEl=null;
   const setStatus=(html,cls)=>{statusEl.className='mb-1'+(cls?' '+cls:'');statusEl.innerHTML=html;};
   // Beri tahu alat: minta tempel kartu (register/select) atau batalkan (off).
   async function setDeviceMode(m){
@@ -61,6 +62,14 @@ document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.t
       mode=btn.dataset.rfidTrigger;target=btn.dataset.rfidTarget;baseId=null;
       setStatus('Menghubungi alat…');
       iconEl&&iconEl.classList.add('scanning');
+      const parentEl=btn.closest('.modal.show');
+      returnModalEl=parentEl||null;
+      if(parentEl){
+        await new Promise(resolve=>{
+          parentEl.addEventListener('hidden.bs.modal',resolve,{once:true});
+          bootstrap.Modal.getOrCreateInstance(parentEl).hide();
+        });
+      }
       modal.show();
       await poll(); // ambil titik awal scan sebelum meminta kartu
       const res=await setDeviceMode(mode==='balita'?'register':'select');
@@ -71,6 +80,13 @@ document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.t
       timer=setInterval(poll,1500);
     });
   });
-  modalEl.addEventListener('hidden.bs.modal',stop);
+  modalEl.addEventListener('hidden.bs.modal',()=>{
+    stop();
+    if(returnModalEl){
+      const parentEl=returnModalEl;
+      returnModalEl=null;
+      bootstrap.Modal.getOrCreateInstance(parentEl).show();
+    }
+  });
 })();
 

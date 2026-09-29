@@ -13,6 +13,14 @@ function url(string $path = ''): string
     return rtrim($config['app']['url'], '/') . '/' . ltrim($path, '/');
 }
 
+function asset_url(string $path): string
+{
+    $path = ltrim($path, '/');
+    $file = dirname(__DIR__) . '/public/' . $path;
+    $version = is_file($file) ? (string)filemtime($file) : '1';
+    return url($path) . '?v=' . rawurlencode($version);
+}
+
 function redirect(string $path): never
 {
     header('Location: ' . ($path === '' || str_starts_with($path, 'http') ? $path : url($path)));
@@ -153,7 +161,7 @@ function render(string $title, callable $content, string $active = ''): void
     <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <title><?= e($title) ?> · <?= e($config['app']['name']) ?></title>
     <link rel="stylesheet" href="<?= e(url('assets/vendor/bootstrap.min.css')) ?>">
-    <link rel="stylesheet" href="<?= e(url('assets/app.css')) ?>">
+    <link rel="stylesheet" href="<?= e(asset_url('assets/app.css')) ?>">
 </head><body>
 <?php if ($user): ?>
 <div class="app-shell">
@@ -176,7 +184,7 @@ function render(string $title, callable $content, string $active = ''): void
 </main><?php if ($user): ?></div><?php endif; ?>
 <script src="<?= e(url('assets/vendor/bootstrap.bundle.min.js')) ?>"></script>
 <script src="<?= e(url('assets/vendor/chart.umd.min.js')) ?>"></script>
-<script src="<?= e(url('assets/app.js')) ?>"></script>
+<script src="<?= e(asset_url('assets/app.js')) ?>"></script>
 </body></html><?php
 }
 
