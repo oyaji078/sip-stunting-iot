@@ -136,8 +136,10 @@ function time_ago(?int $seconds): string
 function rfid_scan_modal(): string
 {
     $scanUrl = e(url('rfid/scan'));
+    $modeUrl = e(url('rfid/mode'));
+    $csrf = e(csrf_token());
     return <<<HTML
-<div class="modal fade" id="rfidModal" tabindex="-1" data-scan-url="{$scanUrl}"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Tempelkan kartu RFID</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body text-center"><div class="rfid-wait" data-rfid-icon>⌁</div><p class="mb-1" data-rfid-status>Silakan tempelkan kartu RFID pada alat…</p><small class="text-muted">Alat harus online dan terhubung ke internet.</small></div></div></div></div>
+<div class="modal fade" id="rfidModal" tabindex="-1" data-scan-url="{$scanUrl}" data-mode-url="{$modeUrl}" data-csrf="{$csrf}"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Tempelkan kartu RFID</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body text-center"><div class="rfid-wait" data-rfid-icon>⌁</div><p class="mb-1" data-rfid-status>Silakan tempelkan kartu RFID pada alat…</p><small class="text-muted">Alat harus online dan terhubung ke internet.</small></div></div></div></div>
 HTML;
 }
 

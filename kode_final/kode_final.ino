@@ -89,7 +89,7 @@
 // =============================================================
 
 const char* API_BASE_URL = "https://posyandu.oypoint.online/api/v1";
-const char* FIRMWARE_VERSION = "2.0.0";
+const char* FIRMWARE_VERSION = "2.1.0";
 
 // ISRG Root X1 (Let's Encrypt), valid until 2035.
 const char* ROOT_CA = R"EOF(
@@ -137,11 +137,19 @@ String pendingRequestId;
 float pendingWeight = 0;
 float pendingHeight = 0;
 
+// Mode tangkap kartu dari website: "off", "register" (daftar balita),
+// atau "select" (pilih balita untuk pemeriksaan). Saat aktif, kartu yang
+// ditempel hanya dikirim ke web dan TIDAK memulai penimbangan.
+String captureMode = "off";
+unsigned long lastModePollAt = 0;
+unsigned long modePollInterval = 3000;
+
 enum RFIDCheckResult
 {
   RFID_REGISTERED,
   RFID_UNKNOWN,
   RFID_INELIGIBLE,
+  RFID_CAPTURED,
   RFID_API_ERROR
 };
 
@@ -744,6 +752,10 @@ RFIDCheckResult checkRFID(String uid)
   if (code <= 0) return RFID_API_ERROR;
 
   String status = response["status"] | "error";
+  if (status == "captured") {
+    childRegistered = false;
+    return RFID_CAPTURED;
+  }
   if (status == "registered") {
     childRegistered = true;
     childName = response["child"]["name"].as<String>();
@@ -1296,14 +1308,78 @@ bool isWeightEmpty()
 // STANDBY LCD
 // =============================================================
 
+void showCaptureRequest()
+{
+  lcdClear();
+
+  if (captureMode == "register") {
+    lcdPrintLine(0, "MODE PENDAFTARAN");
+    lcdPrintLine(1, "Tempelkan kartu");
+    lcdPrintLine(2, "balita yang akan");
+    lcdPrintLine(3, "didaftarkan di web");
+  } else {
+    lcdPrintLine(0, "PILIH BALITA");
+    lcdPrintLine(1, "Tempelkan kartu");
+    lcdPrintLine(2, "untuk pemeriksaan");
+    lcdPrintLine(3, "(permintaan web)");
+  }
+}
+
 void showStandby()
 {
+  if (captureMode != "off") {
+    showCaptureRequest();
+    return;
+  }
+
   lcdClear();
 
   lcdPrintLine(0, "SISTEM IoT");
   lcdPrintLine(1, "DETEKSI STUNTING");
   lcdPrintLine(2, "Tempelkan RFID");
   lcdPrintLine(3, "");
+}
+
+// Tanya server apakah website sedang meminta kartu. Hanya dipanggil saat
+// STANDBY dan tidak ada kartu di reader. Bila gagal, jeda diperpanjang agar
+// pembacaan RFID tidak tersendat oleh koneksi yang buruk.
+void pollCaptureMode()
+{
+  if (millis() - lastModePollAt < modePollInterval) return;
+  lastModePollAt = millis();
+  if (WiFi.status() != WL_CONNECTED || deviceToken.length() < 32) return;
+
+  JsonDocument request;
+  JsonDocument response;
+  request["ping"] = 1; // body harus objek JSON; dokumen kosong terkirim sebagai "null"
+  int code = apiPost("mode", request, response);
+  if (code != 200) {
+    modePollInterval = 15000;
+    return;
+  }
+  modePollInterval = 3000;
+
+  String newMode = response["mode"] | "off";
+  if (newMode != "register" && newMode != "select") newMode = "off";
+  if (newMode != captureMode) {
+    captureMode = newMode;
+    Serial.println("Mode tangkap kartu: " + captureMode);
+    showStandby();
+  }
+}
+
+// Kartu berhasil dikirim ke website (mode tangkap).
+void showCaptureDone()
+{
+  lcdClear();
+
+  lcdPrintLine(0, "KARTU TERBACA");
+  lcdPrintLine(1, currentUID);
+  lcdPrintLine(2, "Dikirim ke website");
+  lcdPrintLine(3, "Lanjutkan di web");
+
+  beepDouble();
+  delay(2500);
 }
 
 // =============================================================
@@ -1616,6 +1692,8 @@ void loop()
       !rfid.PICC_IsNewCardPresent()
     )
     {
+      // Tidak ada kartu: sekalian cek apakah website meminta kartu.
+      pollCaptureMode();
       return;
     }
 
@@ -1665,6 +1743,17 @@ void loop()
     RFIDCheckResult result =
       checkRFID(currentUID);
 
+    if (result == RFID_CAPTURED) {
+      // Website meminta kartu (daftar/pilih balita): UID sudah dikirim,
+      // jangan mulai penimbangan.
+      showCaptureDone();
+      captureMode = "off";
+      lastModePollAt = millis();
+      currentUID = "";
+      currentState = STATE_STANDBY;
+      showStandby();
+      return;
+    }
     if (result == RFID_REGISTERED) {
       currentState = STATE_REGISTERED;
       return;

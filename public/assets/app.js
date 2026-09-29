@@ -13,9 +13,23 @@ document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.t
   const statusEl=modalEl.querySelector('[data-rfid-status]');
   const iconEl=modalEl.querySelector('[data-rfid-icon]');
   const scanUrl=modalEl.dataset.scanUrl;
-  let timer=null,baseId=null,mode=null,target=null;
+  const modeUrl=modalEl.dataset.modeUrl;
+  const csrf=modalEl.dataset.csrf;
+  let timer=null,baseId=null,mode=null,target=null,captureActive=false;
   const setStatus=(html,cls)=>{statusEl.className='mb-1'+(cls?' '+cls:'');statusEl.innerHTML=html;};
-  const stop=()=>{if(timer){clearInterval(timer);timer=null;}iconEl&&iconEl.classList.remove('scanning');};
+  // Beri tahu alat: minta tempel kartu (register/select) atau batalkan (off).
+  async function setDeviceMode(m){
+    try{
+      const body=new URLSearchParams({csrf:csrf,mode:m});
+      const r=await fetch(modeUrl,{method:'POST',body:body,headers:{'Accept':'application/json'}});
+      return await r.json();
+    }catch(e){return null;}
+  }
+  const stop=()=>{
+    if(timer){clearInterval(timer);timer=null;}
+    iconEl&&iconEl.classList.remove('scanning');
+    if(captureActive){captureActive=false;setDeviceMode('off');}
+  };
   async function poll(){
     try{
       const d=await(await fetch(scanUrl,{headers:{'Accept':'application/json'}})).json();
@@ -43,11 +57,18 @@ document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.t
     }
   }
   document.querySelectorAll('[data-rfid-trigger]').forEach(btn=>{
-    btn.addEventListener('click',()=>{
+    btn.addEventListener('click',async()=>{
       mode=btn.dataset.rfidTrigger;target=btn.dataset.rfidTarget;baseId=null;
-      setStatus('Silakan tempelkan kartu RFID pada alat…');
+      setStatus('Menghubungi alat…');
       iconEl&&iconEl.classList.add('scanning');
-      modal.show();poll();timer=setInterval(poll,1500);
+      modal.show();
+      await poll(); // ambil titik awal scan sebelum meminta kartu
+      const res=await setDeviceMode(mode==='balita'?'register':'select');
+      captureActive=!!(res&&res.ok);
+      if(!res||!res.ok){setStatus('Gagal meminta alat. Muat ulang halaman lalu coba lagi.','text-danger');iconEl&&iconEl.classList.remove('scanning');return;}
+      if(res.devices_online<1)setStatus('Tidak ada alat online saat ini. Pastikan alat menyala dan terhubung internet, lalu tempelkan kartu.','text-warning');
+      else setStatus('Alat meminta kartu. Tempelkan kartu RFID pada alat (60 detik)…');
+      timer=setInterval(poll,1500);
     });
   });
   modalEl.addEventListener('hidden.bs.modal',stop);

@@ -107,6 +107,23 @@ if ($path === 'ubah-password') {
     render('Ganti Password', function () { ?><div class="card panel"><div class="card-body"><p>Password sementara wajib diganti sebelum melanjutkan.</p><form method="post" class="form-narrow"><?= csrf_field() ?><label class="form-label">Password baru</label><input class="form-control mb-3" type="password" name="password" required><label class="form-label">Ulangi password</label><input class="form-control mb-3" type="password" name="password_confirmation" required><button class="btn btn-primary">Simpan Password</button></form></div></div><?php }); exit;
 }
 
+if ($path === 'rfid/mode' && $method === 'POST') {
+    verify_csrf();
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    $mode = (string)($_POST['mode'] ?? 'off');
+    if (!in_array($mode, ['register', 'select', 'off'], true)) {
+        http_response_code(422);
+        echo json_encode(['ok' => false, 'error' => 'mode tidak valid']);
+        exit;
+    }
+    $pdo->prepare("INSERT INTO settings (setting_key, setting_value, updated_at) VALUES ('rfid_capture_mode', ?, NOW()) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()")->execute([$mode]);
+    // Alat dianggap siap menerima permintaan bila heartbeat/poll terakhirnya < 90 detik.
+    $online = (int)$pdo->query('SELECT COUNT(*) FROM devices WHERE is_active = 1 AND last_seen_at >= DATE_SUB(NOW(), INTERVAL 90 SECOND)')->fetchColumn();
+    echo json_encode(['ok' => true, 'mode' => $mode, 'devices_online' => $online]);
+    exit;
+}
+
 if ($path === 'rfid/scan') {
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store');

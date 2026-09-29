@@ -23,6 +23,7 @@ final class ApiController
 
         match ($endpoint) {
             'heartbeat' => $this->heartbeat($payload),
+            'mode' => $this->mode(),
             'rfid/lookup' => $this->lookup($payload),
             'measurements' => $this->measurement($payload),
             default => json_response(['status' => 'error', 'error' => ['code' => 'not_found', 'message' => 'Endpoint tidak ditemukan.']], 404),
@@ -63,6 +64,40 @@ final class ApiController
         json_response(['status' => 'success', 'server_time' => date(DATE_ATOM), 'device' => ['id' => $this->device['device_uid'], 'name' => $this->device['name']]]);
     }
 
+    /**
+     * Mode tangkap kartu yang diminta dari web (tombol "Tempel RFID"/"Via RFID").
+     * Disimpan di tabel settings agar tanpa migrasi; kedaluwarsa 60 detik dihitung
+     * dari jam database (bukan PHP) supaya kebal beda timezone.
+     */
+    private function activeCaptureMode(): array
+    {
+        try {
+            $row = $this->pdo->query("SELECT setting_value, TIMESTAMPDIFF(SECOND, updated_at, NOW()) AS age FROM settings WHERE setting_key = 'rfid_capture_mode'")->fetch();
+        } catch (Throwable $e) {
+            return ['off', 0];
+        }
+        if (!$row || !in_array($row['setting_value'], ['register', 'select'], true)) {
+            return ['off', 0];
+        }
+        $left = 60 - (int)$row['age'];
+        return $left > 0 ? [$row['setting_value'], $left] : ['off', 0];
+    }
+
+    private function clearCaptureMode(): void
+    {
+        try {
+            $this->pdo->exec("UPDATE settings SET setting_value = 'off', updated_at = NOW() WHERE setting_key = 'rfid_capture_mode'");
+        } catch (Throwable $e) {
+            // abaikan: mode akan kedaluwarsa sendiri
+        }
+    }
+
+    private function mode(): never
+    {
+        [$mode, $left] = $this->activeCaptureMode();
+        json_response(['status' => 'success', 'mode' => $mode, 'seconds_left' => $left]);
+    }
+
     private function lookup(array $payload): never
     {
         try {
@@ -73,6 +108,16 @@ final class ApiController
         $stmt = $this->pdo->prepare('SELECT * FROM children WHERE rfid_uid = ? LIMIT 1');
         $stmt->execute([$uid]);
         $child = $stmt->fetch();
+
+        // Web sedang meminta kartu (daftar/pilih balita): tangkap UID saja,
+        // jangan mulai alur timbang di alat.
+        [$captureMode] = $this->activeCaptureMode();
+        if ($captureMode !== 'off') {
+            $this->clearCaptureMode();
+            $this->recordScan($uid, 'captured', $child ? (int)$child['id'] : null);
+            json_response(['status' => 'captured', 'mode' => $captureMode, 'uid' => $uid, 'registered' => (bool)$child]);
+        }
+
         if (!$child) {
             $stmt = $this->pdo->prepare('INSERT INTO unknown_rfid_scans (rfid_uid, device_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE scan_count = scan_count + 1, last_scanned_at = NOW()');
             $stmt->execute([$uid, $this->device['id']]);
