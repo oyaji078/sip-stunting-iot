@@ -34,8 +34,8 @@
  RFID RC522
  SDA/SS -> GPIO 5
  SCK    -> GPIO 18
- MOSI   -> GPIO 23
- MISO   -> GPIO 19
+ MOSI   -> GPIO 19
+ MISO   -> GPIO 23
  RST    -> GPIO 27
 
  BUZZER
@@ -176,8 +176,8 @@ enum RFIDCheckResult
 #define RFID_RST  27
 
 #define RFID_SCK  18
-#define RFID_MISO 19
-#define RFID_MOSI 23
+#define RFID_MISO 23
+#define RFID_MOSI 19
 
 // ---------------- BUZZER ----------------
 #define BUZZER_PIN 25
@@ -452,7 +452,6 @@ void lcdBegin()
 
 void buzzerOn(int frequency = 5000)
 {
-  ledcAttach(BUZZER_PIN, frequency, 8);
   ledcWriteTone(BUZZER_PIN, frequency);
 }
 
@@ -1550,6 +1549,7 @@ void initHX711()
 bool isRFIDVersionValid(byte version)
 {
   return version == 0x12 || // chip counterfeit yang umum
+         version == 0x82 || // clone RC522 pada alat ini (teruji membaca UID)
          version == 0x88 || // clone FM17522
          version == 0x90 || // MFRC522 v0.0
          version == 0x91 || // MFRC522 v1.0
