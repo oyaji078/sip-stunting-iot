@@ -66,6 +66,18 @@ CREATE TABLE IF NOT EXISTS unknown_rfid_scans (
     UNIQUE KEY uq_unknown_scan (rfid_uid, device_id), INDEX idx_unknown_last (last_scanned_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS rfid_scans (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    device_id BIGINT UNSIGNED NOT NULL,
+    rfid_uid VARCHAR(32) NOT NULL,
+    outcome VARCHAR(20) NOT NULL,
+    child_id BIGINT UNSIGNED NULL,
+    scanned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_rfid_scans_device FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    CONSTRAINT fk_rfid_scans_child FOREIGN KEY (child_id) REFERENCES children(id) ON DELETE SET NULL,
+    INDEX idx_rfid_scans_at (scanned_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS who_lms (
     sex TINYINT UNSIGNED NOT NULL,
     age_days SMALLINT UNSIGNED NOT NULL,

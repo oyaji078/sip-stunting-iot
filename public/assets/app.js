@@ -5,3 +5,51 @@ if(chart&&window.Chart){const rows=JSON.parse(chart.dataset.values||'[]');const 
 document.querySelector('#voidModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
 document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
 
+// Tempel RFID: minta tempel kartu di alat, lalu isi form dari scan terbaru.
+(function(){
+  const modalEl=document.getElementById('rfidModal');
+  if(!modalEl||!window.bootstrap)return;
+  const modal=new bootstrap.Modal(modalEl);
+  const statusEl=modalEl.querySelector('[data-rfid-status]');
+  const iconEl=modalEl.querySelector('[data-rfid-icon]');
+  const scanUrl=modalEl.dataset.scanUrl;
+  let timer=null,baseId=null,mode=null,target=null;
+  const setStatus=(html,cls)=>{statusEl.className='mb-1'+(cls?' '+cls:'');statusEl.innerHTML=html;};
+  const stop=()=>{if(timer){clearInterval(timer);timer=null;}iconEl&&iconEl.classList.remove('scanning');};
+  async function poll(){
+    try{
+      const d=await(await fetch(scanUrl,{headers:{'Accept':'application/json'}})).json();
+      if(baseId===null){baseId=d.id||0;return;}
+      if(d.id&&d.id>baseId&&d.age<=30){stop();handle(d);}
+    }catch(e){/* jaringan: coba lagi tick berikutnya */}
+  }
+  function handle(d){
+    const uid=(d.uid||'').toString();
+    if(mode==='balita'){
+      const input=document.querySelector(target);
+      if(input)input.value=uid;
+      if(d.child_id)setStatus('Kartu <code>'+uid+'</code> sudah dipakai <b>'+(d.child_name||'balita lain')+'</b>. Periksa kembali.','text-warning');
+      else setStatus('UID <code>'+uid+'</code> terisi. Lengkapi data lalu simpan.','text-success');
+      setTimeout(()=>modal.hide(),1400);
+    }else if(mode==='pemeriksaan'){
+      if(d.child_id&&d.child_active){
+        const sel=document.querySelector(target);
+        if(sel)sel.value=String(d.child_id);
+        setStatus('<b>'+(d.child_name||'Balita')+'</b> dipilih.','text-success');
+        setTimeout(()=>modal.hide(),1200);
+      }else{
+        setStatus('UID <code>'+uid+'</code> belum terdaftar/aktif. Daftarkan dulu di menu Data Balita.','text-danger');
+      }
+    }
+  }
+  document.querySelectorAll('[data-rfid-trigger]').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      mode=btn.dataset.rfidTrigger;target=btn.dataset.rfidTarget;baseId=null;
+      setStatus('Silakan tempelkan kartu RFID pada alat…');
+      iconEl&&iconEl.classList.add('scanning');
+      modal.show();poll();timer=setInterval(poll,1500);
+    });
+  });
+  modalEl.addEventListener('hidden.bs.modal',stop);
+})();
+
