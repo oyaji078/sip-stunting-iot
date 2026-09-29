@@ -494,6 +494,11 @@ void connectWiFi(bool forcePortal = false)
   char tokenBuffer[97];
   deviceToken.substring(0, 96).toCharArray(tokenBuffer, sizeof(tokenBuffer));
 
+  // Token belum tersimpan (belum pernah dikonfigurasi) harus tetap membuka
+  // portal walau WiFi sudah tersimpan/terhubung, karena field token hanya
+  // ada di halaman portal ini.
+  bool needsPortal = forcePortal || deviceToken.length() < 32;
+
   WiFiManager manager;
   WiFiManagerParameter tokenParam("token", "Token perangkat dari website", tokenBuffer, 96);
   manager.addParameter(&tokenParam);
@@ -501,16 +506,16 @@ void connectWiFi(bool forcePortal = false)
   manager.setConnectTimeout(20);
 
   lcdClear();
-  lcdPrintLine(0, forcePortal ? "KONFIGURASI ALAT" : "MENGHUBUNGKAN WIFI");
+  lcdPrintLine(0, needsPortal ? "KONFIGURASI ALAT" : "MENGHUBUNGKAN WIFI");
   lcdPrintLine(1, deviceId);
-  if (forcePortal || WiFi.SSID().isEmpty()) {
+  if (needsPortal || WiFi.SSID().isEmpty()) {
     lcdPrintLine(2, apName);
     lcdPrintLine(3, "Sandi: " + apPassword);
   } else {
     lcdPrintLine(2, "Mohon tunggu...");
   }
 
-  bool connected = forcePortal
+  bool connected = needsPortal
     ? manager.startConfigPortal(apName.c_str(), apPassword.c_str())
     : manager.autoConnect(apName.c_str(), apPassword.c_str());
 
