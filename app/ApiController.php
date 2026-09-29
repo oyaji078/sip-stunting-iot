@@ -115,7 +115,7 @@ final class ApiController
 
             $measuredAt = date('Y-m-d H:i:s');
             $growth = (new GrowthService($this->pdo))->calculate($child['sex'], $child['birth_date'], substr($measuredAt, 0, 10), (float)$height);
-            $insert = $this->pdo->prepare('INSERT INTO measurements (request_id, child_id, device_id, source, measured_at, age_days, weight_kg, height_cm, z_score, category, reference_version) VALUES (?, ?, ?, \'iot\', ?, ?, ?, ?, ?, ?, ?)');
+            $insert = $this->pdo->prepare('INSERT INTO measurements (request_id, child_id, device_id, source, status, measured_at, age_days, weight_kg, height_cm, z_score, category, reference_version) VALUES (?, ?, ?, \'iot\', \'pending\', ?, ?, ?, ?, ?, ?, ?)');
             $insert->execute([$requestId, $child['id'], $this->device['id'], $measuredAt, $growth['age_days'], $weight, $height, $growth['z_score'], $growth['category'], $growth['reference_version']]);
             json_response(['status' => 'success', 'duplicate' => false, 'measurement_id' => (int)$this->pdo->lastInsertId(), 'z_score' => $growth['z_score'], 'category' => $growth['category']]);
         } catch (DomainException|InvalidArgumentException $e) {

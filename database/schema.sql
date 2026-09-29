@@ -83,6 +83,9 @@ CREATE TABLE IF NOT EXISTS measurements (
     device_id BIGINT UNSIGNED NULL,
     recorded_by BIGINT UNSIGNED NULL,
     source ENUM('iot','manual') NOT NULL,
+    status ENUM('pending','approved') NOT NULL DEFAULT 'approved',
+    approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL,
     measured_at DATETIME NOT NULL,
     age_days SMALLINT UNSIGNED NOT NULL,
     weight_kg DECIMAL(6,2) NOT NULL,
@@ -98,8 +101,9 @@ CREATE TABLE IF NOT EXISTS measurements (
     CONSTRAINT fk_measure_device FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE SET NULL,
     CONSTRAINT fk_measure_user FOREIGN KEY (recorded_by) REFERENCES users(id) ON DELETE SET NULL,
     CONSTRAINT fk_measure_void_user FOREIGN KEY (voided_by) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_measure_approved_user FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL,
     UNIQUE KEY uq_device_request (device_id, request_id),
-    INDEX idx_measure_date (measured_at), INDEX idx_measure_category (category), INDEX idx_measure_child (child_id)
+    INDEX idx_measure_date (measured_at), INDEX idx_measure_category (category), INDEX idx_measure_child (child_id), INDEX idx_measure_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS settings (
