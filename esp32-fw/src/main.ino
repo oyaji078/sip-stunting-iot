@@ -136,6 +136,10 @@ String pendingUid;
 String pendingRequestId;
 float pendingWeight = 0;
 float pendingHeight = 0;
+bool rfidReady = false;
+bool scaleReady = false;
+bool tofReady = false;
+bool lcdReady = false;
 
 // Mode tangkap kartu dari website: "off", "register" (daftar balita),
 // atau "select" (pilih balita untuk pemeriksaan). Saat aktif, kartu yang
@@ -487,19 +491,40 @@ void beepLong()
   buzzerOff();
 }
 
+void beepSuccess()
+{
+  buzzerOn(2800);
+  delay(110);
+  buzzerOff();
+  delay(80);
+  buzzerOn(4300);
+  delay(180);
+  buzzerOff();
+}
+
+void beepError()
+{
+  for (int i = 0; i < 3; i++)
+  {
+    buzzerOn(1200);
+    delay(170);
+    buzzerOff();
+    if (i < 2) delay(100);
+  }
+}
+
 // =============================================================
 // WIFI
 // =============================================================
 
 void connectWiFi(bool forcePortal = false)
 {
-  uint64_t chip = ESP.getEfuseMac();
-  char chipSuffix[13];
-  snprintf(chipSuffix, sizeof(chipSuffix), "%08llX", chip & 0xFFFFFFFFULL);
-  deviceId = "ESP32-" + String(chipSuffix);
+  // Instalasi ini hanya memakai satu alat. Identitas API ditentukan oleh
+  // token, bukan lagi oleh ID chip ESP32 yang dapat berubah saat board diganti.
+  deviceId = "SIP-STUNTING-01";
 
-  String apName = "SIP-STUNTING-" + String(chipSuffix).substring(4);
-  String apPassword = "SIP" + String(chipSuffix).substring(0, 5);
+  String apName = "SIP-STUNTING-IOT";
+  String apPassword = "SIPSTUNTING";
   char tokenBuffer[97];
   deviceToken.substring(0, 96).toCharArray(tokenBuffer, sizeof(tokenBuffer));
 
@@ -578,7 +603,6 @@ int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
 
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Accept", "application/json");
-  http.addHeader("X-Device-ID", deviceId);
   http.addHeader("Authorization", "Bearer " + deviceToken);
 
   String body;
@@ -609,6 +633,12 @@ void sendHeartbeat()
   JsonDocument response;
   request["firmware_version"] = FIRMWARE_VERSION;
   request["wifi_rssi"] = WiFi.RSSI();
+  request["uptime_seconds"] = millis() / 1000;
+  JsonObject sensors = request["sensors"].to<JsonObject>();
+  sensors["rfid"] = rfidReady;
+  sensors["weight"] = scaleReady;
+  sensors["height"] = tofReady;
+  sensors["lcd"] = lcdReady;
   int code = apiPost("heartbeat", request, response);
   Serial.println("Heartbeat HTTP " + String(code));
   if (authFailureCount >= 3) {
@@ -1469,6 +1499,7 @@ bool initToF()
 
   if (!tof.init())
   {
+    tofReady = false;
     Serial.println("VL53L1X gagal");
 
     return false;
@@ -1487,6 +1518,8 @@ bool initToF()
   tof.startContinuous(50);
 
   Serial.println("VL53L1X siap");
+
+  tofReady = true;
 
   return true;
 }
@@ -1539,6 +1572,8 @@ void initHX711()
     "Tare selesai"
   );
 
+  scaleReady = scale.is_ready();
+
   delay(1000);
 }
 
@@ -1585,6 +1620,7 @@ bool initRFID()
   // seperti 0xFE juga menandakan MISO/SS mengambang atau komunikasi gagal.
   if (!isRFIDVersionValid(version))
   {
+    rfidReady = false;
     Serial.println("RFID RC522 tidak terdeteksi - periksa 3.3V dan kabel SPI");
     return false;
   }
@@ -1593,6 +1629,7 @@ bool initRFID()
   rfid.PCD_SetAntennaGain(MFRC522::RxGain_max);
   rfid.PCD_AntennaOn();
   lastRFIDHealthCheckAt = millis();
+  rfidReady = true;
 
   Serial.println("RFID RC522 siap");
   return true;
@@ -1608,8 +1645,18 @@ void recoverRFIDIfNeeded()
   if (!isRFIDVersionValid(version))
   {
     Serial.println("Komunikasi RFID terputus, mencoba inisialisasi ulang...");
-    initRFID();
+    rfidReady = initRFID();
   }
+  else
+  {
+    rfidReady = true;
+  }
+}
+
+bool isLCDReady()
+{
+  I2C_LCD.beginTransmission(LCD_ADDRESS);
+  return I2C_LCD.endTransmission() == 0;
 }
 
 // =============================================================
@@ -1646,6 +1693,7 @@ void setup()
   );
 
   lcdBegin();
+  lcdReady = isLCDReady();
 
   lcdClear();
 
@@ -1686,14 +1734,14 @@ void setup()
 
     while (true)
     {
-      beepLong();
+      beepError();
       delay(2000);
     }
   }
 
   // ---------------- RFID ----------------
 
-  initRFID();
+  rfidReady = initRFID();
 
   // ---------------- WIFI ----------------
 
@@ -1715,8 +1763,10 @@ void setup()
 
 void loop()
 {
-  if (millis() - lastHeartbeatAt >= 30000 || lastHeartbeatAt == 0) {
+  if (millis() - lastHeartbeatAt >= 10000 || lastHeartbeatAt == 0) {
     lastHeartbeatAt = millis();
+    scaleReady = scale.is_ready();
+    lcdReady = isLCDReady();
     if (!pendingMeasurement) sendHeartbeat();
   }
 
@@ -1837,7 +1887,7 @@ void loop()
       lcdPrintLine(1, "RFID tidak diproses");
       lcdPrintLine(2, "Coba kembali");
     }
-    beepDouble();
+    beepError();
     delay(3000);
     currentUID = "";
     currentState = STATE_STANDBY;
@@ -1996,8 +2046,6 @@ void loop()
         " cm"
       );
 
-      beepDouble();
-
       lcdClear();
 
       lcdPrintLine(
@@ -2038,6 +2086,8 @@ void loop()
           "GAGAL KIRIM DATA"
         );
 
+        beepError();
+
         lcdPrintLine(
           1,
           "Periksa WiFi/API"
@@ -2052,6 +2102,8 @@ void loop()
 
         return;
       }
+
+      beepSuccess();
 
       currentState =
         STATE_RESULT_Z;

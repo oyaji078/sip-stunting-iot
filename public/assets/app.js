@@ -6,6 +6,43 @@ document.querySelector('#voidModal')?.addEventListener('show.bs.modal',e=>{e.tar
 document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
 document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.getOrCreateInstance(el).show());
 
+// Monitor alat IoT: sinkronkan status perangkat dan sensor tanpa reload.
+(function(){
+  const root=document.querySelector('[data-device-live]');
+  if(!root)return;
+  const url=root.dataset.statusUrl;
+  const sensorText=value=>value===true?'Normal':value===false?'Gangguan':'Belum ada data';
+  const sensorClass=value=>value===true?'ok':value===false?'error':'unknown';
+  async function refreshDevices(){
+    try{
+      const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'});
+      if(!response.ok)throw new Error('HTTP '+response.status);
+      const payload=await response.json();
+      (payload.devices||[]).forEach(device=>{
+        const card=root.querySelector('[data-device-id="'+device.id+'"]');
+        if(!card)return;
+        const status=card.querySelector('[data-device-status]');
+        status.textContent=device.status;
+        status.className='status status-'+device.status_color;
+        card.querySelector('[data-device-firmware]').textContent=device.firmware;
+        card.querySelector('[data-device-rssi]').textContent=device.rssi;
+        card.querySelector('[data-device-last]').textContent=device.last_seen;
+        card.querySelector('[data-device-uptime]').textContent=device.uptime;
+        Object.entries(device.sensors||{}).forEach(([key,value])=>{
+          if(key==='uptime_seconds')return;
+          const item=card.querySelector('[data-sensor="'+key+'"] .sensor-state');
+          if(!item)return;
+          item.textContent=sensorText(value);
+          item.className='sensor-state sensor-'+sensorClass(value);
+        });
+      });
+      root.classList.remove('live-error');
+    }catch(error){root.classList.add('live-error');}
+  }
+  refreshDevices();
+  setInterval(refreshDevices,5000);
+})();
+
 // Tempel RFID: minta tempel kartu di alat, lalu isi form dari scan terbaru.
 (function(){
   const modalEl=document.getElementById('rfidModal');
