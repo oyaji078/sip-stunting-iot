@@ -3,6 +3,15 @@ document.addEventListener('click',e=>{if(e.target.closest('.main')&&!e.target.cl
 const chart=document.querySelector('#categoryChart');
 if(chart&&window.Chart){const rows=JSON.parse(chart.dataset.values||'[]');const colors={'Sangat Pendek':'#9f2632','Pendek/Stunting':'#e36d48','Normal':'#238a70','Tinggi':'#4a8eb0'};new Chart(chart,{type:'doughnut',data:{labels:rows.map(x=>x.category),datasets:[{data:rows.map(x=>x.total),backgroundColor:rows.map(x=>colors[x.category]||'#ccc'),borderWidth:0}]},options:{cutout:'70%',plugins:{legend:{position:'bottom',labels:{boxWidth:10,usePointStyle:true}}}}})}
 document.querySelector('#voidModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
+document.querySelector('#deleteChildModal')?.addEventListener('show.bs.modal',e=>{
+  const m=e.target,d=e.relatedTarget.dataset,n=parseInt(d.count||'0',10);
+  m.querySelector('[name=id]').value=d.id;
+  m.querySelector('[data-delete-name]').textContent=d.name;
+  const box=m.querySelector('[data-delete-history]'),cb=m.querySelector('[name=confirm_history]');
+  box.classList.toggle('d-none',n<1);
+  m.querySelector('[data-delete-count]').textContent=n;
+  cb.checked=false;cb.required=n>0;
+});
 document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
 document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.getOrCreateInstance(el).show());
 
