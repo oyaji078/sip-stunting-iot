@@ -143,6 +143,8 @@ float pendingHeight = 0;
 String captureMode = "off";
 unsigned long lastModePollAt = 0;
 unsigned long modePollInterval = 3000;
+unsigned long lastRFIDHealthCheckAt = 0;
+const unsigned long RFID_HEALTH_CHECK_INTERVAL = 5000;
 
 enum RFIDCheckResult
 {
@@ -1542,6 +1544,63 @@ void initHX711()
 }
 
 // =============================================================
+// INISIALISASI DAN PEMULIHAN RFID RC522
+// =============================================================
+
+bool initRFID()
+{
+  // Pastikan chip-select tidak aktif ketika bus SPI mulai. Beberapa modul
+  // RC522 tidak merespons setelah boot bila SS/RST sempat mengambang.
+  pinMode(RFID_SS, OUTPUT);
+  digitalWrite(RFID_SS, HIGH);
+  pinMode(RFID_RST, OUTPUT);
+  digitalWrite(RFID_RST, HIGH);
+  delay(50);
+
+  SPI.begin(
+    RFID_SCK,
+    RFID_MISO,
+    RFID_MOSI,
+    RFID_SS
+  );
+
+  rfid.PCD_Init();
+  delay(50);
+
+  byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  Serial.printf("RFID RC522 VersionReg: 0x%02X\n", version);
+
+  // 0x00/0xFF berarti ESP32 tidak menerima jawaban dari RC522.
+  if (version == 0x00 || version == 0xFF)
+  {
+    Serial.println("RFID RC522 tidak terdeteksi - periksa 3.3V dan kabel SPI");
+    return false;
+  }
+
+  // Maksimalkan sensitivitas agar kartu lebih mudah terbaca pada casing alat.
+  rfid.PCD_SetAntennaGain(MFRC522::RxGain_max);
+  rfid.PCD_AntennaOn();
+  lastRFIDHealthCheckAt = millis();
+
+  Serial.println("RFID RC522 siap");
+  return true;
+}
+
+void recoverRFIDIfNeeded()
+{
+  if (millis() - lastRFIDHealthCheckAt < RFID_HEALTH_CHECK_INTERVAL)
+    return;
+
+  lastRFIDHealthCheckAt = millis();
+  byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  if (version == 0x00 || version == 0xFF)
+  {
+    Serial.println("Komunikasi RFID terputus, mencoba inisialisasi ulang...");
+    initRFID();
+  }
+}
+
+// =============================================================
 // SETUP
 // =============================================================
 
@@ -1622,18 +1681,7 @@ void setup()
 
   // ---------------- RFID ----------------
 
-  SPI.begin(
-    RFID_SCK,
-    RFID_MISO,
-    RFID_MOSI,
-    RFID_SS
-  );
-
-  rfid.PCD_Init();
-
-  Serial.println(
-    "RFID RC522 siap"
-  );
+  initRFID();
 
   // ---------------- WIFI ----------------
 
@@ -1688,6 +1736,8 @@ void loop()
   {
     // Tunggu kartu RFID
 
+    recoverRFIDIfNeeded();
+
     if (
       !rfid.PICC_IsNewCardPresent()
     )
@@ -1701,7 +1751,10 @@ void loop()
       !rfid.PICC_ReadCardSerial()
     )
     {
-      return;
+      // Gangguan singkat pada kartu/bus tidak perlu menggagalkan tap pertama.
+      delay(5);
+      if (!rfid.PICC_ReadCardSerial())
+        return;
     }
 
     currentUID =
