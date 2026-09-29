@@ -186,7 +186,7 @@ function app_brand(): array
 {
     global $config;
     $name = trim((string)($config['app']['brand_name'] ?? '')) ?: 'Posyandu Ingin Sehat';
-    $place = trim((string)($config['app']['brand_place'] ?? '')) ?: 'Dusun Dames Borneo';
+    $place = trim((string)($config['app']['brand_place'] ?? '')) ?: 'Dusun Dames Burneo';
     // Kata pertama jadi baris atas ("Posyandu"), sisanya baris kedua ("Ingin Sehat").
     $parts = preg_split('/\s+/', $name, 2);
     return [
