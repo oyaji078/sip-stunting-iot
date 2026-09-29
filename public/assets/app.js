@@ -123,7 +123,7 @@ document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.ge
       if(!res||!res.ok){setStatus('Gagal meminta alat. Muat ulang halaman lalu coba lagi.','text-danger');iconEl&&iconEl.classList.remove('scanning');return;}
       if(res.devices_online<1)setStatus('Tidak ada alat online saat ini. Pastikan alat menyala dan terhubung internet, lalu tempelkan kartu.','text-warning');
       else setStatus('Alat meminta kartu. Tempelkan kartu RFID pada alat (60 detik)…');
-      timer=setInterval(poll,1500);
+      timer=setInterval(poll,700);
     });
   });
   modalEl.addEventListener('hidden.bs.modal',()=>{
