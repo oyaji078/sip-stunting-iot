@@ -5,6 +5,9 @@ declare(strict_types=1);
 return [
     'app' => [
         'name' => 'SIP Stunting IoT',
+        // Opsional: tampil di judul halaman, sidebar, dan halaman masuk.
+        'brand_name' => 'Posyandu Ingin Sehat',
+        'brand_place' => 'Dusun Dames Borneo',
         'url' => 'https://posyandu.oypoint.online',
         'timezone' => 'Asia/Makassar',
         'setup_token' => 'GANTI_DENGAN_TOKEN_ACAK_MINIMAL_32_KARAKTER',
