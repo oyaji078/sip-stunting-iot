@@ -89,7 +89,7 @@
 // =============================================================
 
 const char* API_BASE_URL = "https://posyandu.oypoint.online/api/v1";
-const char* FIRMWARE_VERSION = "2.1.0";
+const char* FIRMWARE_VERSION = "2.1.1";
 
 // ISRG Root X1 (Let's Encrypt), valid until 2035.
 const char* ROOT_CA = R"EOF(
@@ -129,6 +129,12 @@ Preferences preferences;
 String deviceId;
 String deviceToken;
 int authFailureCount = 0;
+
+// Satu koneksi HTTPS dipakai ulang (keep-alive) untuk semua request. Handshake
+// TLS di ESP32 memakan 1-3 detik; dibuat baru tiap request membuat loop macet
+// dan kartu RFID terasa sangat lambat terbaca.
+WiFiClientSecure secureClient;
+bool secureClientReady = false;
 unsigned long lastHeartbeatAt = 0;
 unsigned long lastPendingRetryAt = 0;
 bool pendingMeasurement = false;
@@ -146,7 +152,7 @@ bool lcdReady = false;
 // ditempel hanya dikirim ke web dan TIDAK memulai penimbangan.
 String captureMode = "off";
 unsigned long lastModePollAt = 0;
-unsigned long modePollInterval = 3000;
+unsigned long modePollInterval = 2000;
 unsigned long lastRFIDHealthCheckAt = 0;
 const unsigned long RFID_HEALTH_CHECK_INTERVAL = 5000;
 
@@ -561,6 +567,8 @@ void connectWiFi(bool forcePortal = false)
   }
 
   if (connected) {
+    // Matikan hemat daya WiFi: mode tidur modem menambah latensi tiap paket.
+    WiFi.setSleep(false);
     configTime(8 * 3600, 0, "pool.ntp.org", "time.google.com");
     time_t now = time(nullptr);
     unsigned long waitStarted = millis();
@@ -595,21 +603,44 @@ int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
   if (!ensureWiFi() || deviceToken.length() < 32)
     return -1;
 
-  WiFiClientSecure client;
-  client.setCACert(ROOT_CA);
-  HTTPClient http;
+  if (!secureClientReady) {
+    secureClient.setCACert(ROOT_CA);
+    secureClientReady = true;
+  }
+
   String url = String(API_BASE_URL) + "/" + endpoint;
-  if (!http.begin(client, url)) return -1;
-
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Accept", "application/json");
-  http.addHeader("Authorization", "Bearer " + deviceToken);
-
   String body;
   serializeJson(request, body);
-  int code = http.POST(body);
-  String raw = code > 0 ? http.getString() : "";
-  http.end();
+
+  int code = -1;
+  String raw;
+
+  // Percobaan kedua hanya bila koneksi lama yang dipakai ulang ternyata sudah
+  // ditutup server. Aman diulang: heartbeat/lookup idempoten dan pengiriman
+  // pemeriksaan memakai request_id.
+  for (int attempt = 0; attempt < 2; attempt++)
+  {
+    bool reused = secureClient.connected();
+
+    HTTPClient http;
+    http.setReuse(true);
+    http.setConnectTimeout(5000);
+    http.setTimeout(6000);
+    if (!http.begin(secureClient, url)) return -1;
+
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Accept", "application/json");
+    http.addHeader("Authorization", "Bearer " + deviceToken);
+
+    code = http.POST(body);
+    raw = code > 0 ? http.getString() : "";
+    http.end();
+
+    if (code > 0) break;
+
+    secureClient.stop(); // koneksi rusak: buang dan buka yang baru
+    if (!reused) break;  // sudah koneksi baru, tidak perlu diulang
+  }
 
   if (code == 401 || code == 403) {
     authFailureCount++;
@@ -643,6 +674,7 @@ void sendHeartbeat()
   Serial.println("Heartbeat HTTP " + String(code));
   if (authFailureCount >= 3) {
     authFailureCount = 0;
+    secureClient.stop(); // bebaskan memori TLS sebelum portal konfigurasi
     connectWiFi(true);
   }
 }
@@ -1388,7 +1420,7 @@ void pollCaptureMode()
     modePollInterval = 15000;
     return;
   }
-  modePollInterval = 3000;
+  modePollInterval = 2000;
 
   String newMode = response["mode"] | "off";
   if (newMode != "register" && newMode != "select") newMode = "off";
@@ -1410,7 +1442,18 @@ void showCaptureDone()
   lcdPrintLine(3, "Lanjutkan di web");
 
   beepSuccess();
-  delay(2500);
+  delay(1200);
+}
+
+// Umpan balik instan begitu UID terbaca, SEBELUM menunggu jaringan/server,
+// supaya pengguna langsung tahu kartunya sudah terbaca.
+void showCardDetected()
+{
+  lcdPrintLine(0, "KARTU TERBACA");
+  lcdPrintLine(1, currentUID);
+  lcdPrintLine(2, captureMode != "off" ? "Mengirim ke website" : "Memeriksa data...");
+  lcdPrintLine(3, "");
+  beepShort();
 }
 
 // =============================================================
@@ -1440,7 +1483,7 @@ void showUnknownRFID()
 
   beepError();
 
-  delay(2500);
+  delay(1500);
 
   lcdClear();
 
@@ -1449,7 +1492,7 @@ void showUnknownRFID()
   lcdPrintLine(2, "Buka Website");
   lcdPrintLine(3, "Menu Pendaftaran");
 
-  delay(3500);
+  delay(1800);
 }
 
 // =============================================================
@@ -1484,7 +1527,7 @@ void showRegisteredRFID()
 
   beepSuccess();
 
-  delay(2500);
+  delay(1200);
 }
 
 // =============================================================
@@ -1847,6 +1890,9 @@ void loop()
 
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
+
+    // Beri tahu pengguna sekarang juga; pengecekan ke server menyusul.
+    showCardDetected();
 
     currentState =
       STATE_CHECK_RFID;
