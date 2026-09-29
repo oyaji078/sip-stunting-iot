@@ -51,7 +51,7 @@ if ($path === 'setup') {
     $credentials = $_SESSION['setup_credentials'] ?? null;
     unset($_SESSION['setup_credentials']);
     render('Setup Sistem', function () use ($credentials) { ?>
-    <div class="auth-card card"><div class="card-body p-4 p-md-5"><div class="text-center mb-4"><div class="brand-mark mx-auto mb-3"><?= e(app_brand()['initial']) ?></div><h2>Setup <?= e(app_brand()['name']) ?></h2><p class="text-muted mb-0"><?= e(app_brand()['place']) ?></p></div>
+    <div class="auth-card card"><div class="card-body p-4 p-md-5"><div class="text-center mb-4"><div class="brand-mark mx-auto mb-3"><?= e(app_brand()['initial']) ?></div><h2>Setup<br><?= e(app_brand()['line1']) ?> <?= e(app_brand()['line2']) ?></h2><p class="text-muted mb-0"><?= e(app_brand()['place']) ?></p></div>
     <?php if ($credentials): ?><div class="alert alert-success"><b>Setup selesai.</b><br>Username: <code><?= e($credentials['username']) ?></code><br>Password sementara: <code><?= e($credentials['password']) ?></code><br><small>Simpan sekarang; password ini hanya ditampilkan sekali.</small></div><a class="btn btn-primary w-100" href="<?= e(url('login')) ?>">Masuk ke aplikasi</a>
     <?php else: ?><form method="post"><?= csrf_field() ?><label class="form-label">Token setup</label><input class="form-control mb-3" type="password" name="setup_token" required autocomplete="off"><button class="btn btn-primary w-100">Jalankan migrasi dan buat admin</button></form><?php endif; ?>
     </div></div><?php }, ''); exit;
@@ -80,7 +80,7 @@ if ($path === 'login') {
         }
         redirect('login');
     }
-    render('Masuk', function () { ?><div class="auth-card card"><div class="card-body p-4 p-md-5"><div class="text-center mb-4"><div class="brand-mark mx-auto mb-3"><?= e(app_brand()['initial']) ?></div><h2><?= e(app_brand()['name']) ?></h2><p class="auth-place"><?= e(app_brand()['place']) ?></p><p class="text-muted">Masuk untuk mengelola layanan Posyandu</p></div><form method="post"><?= csrf_field() ?><label class="form-label">Username</label><input class="form-control mb-3" name="username" required autofocus><label class="form-label">Password</label><input class="form-control mb-4" type="password" name="password" required><button class="btn btn-primary w-100">Masuk</button></form></div></div><?php }, ''); exit;
+    render('Masuk', function () { ?><div class="auth-card card"><div class="card-body p-4 p-md-5"><div class="text-center mb-4"><div class="brand-mark mx-auto mb-3"><?= e(app_brand()['initial']) ?></div><h2><?= e(app_brand()['line1']) ?><?php if (app_brand()['line2'] !== ''): ?><br><?= e(app_brand()['line2']) ?><?php endif; ?></h2><p class="auth-place"><?= e(app_brand()['place']) ?></p><p class="text-muted">Masuk untuk mengelola layanan Posyandu</p></div><form method="post"><?= csrf_field() ?><label class="form-label">Username</label><input class="form-control mb-3" name="username" required autofocus><label class="form-label">Password</label><input class="form-control mb-4" type="password" name="password" required><button class="btn btn-primary w-100">Masuk</button></form></div></div><?php }, ''); exit;
 }
 
 if ($path === 'logout') {

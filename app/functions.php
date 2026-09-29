@@ -187,7 +187,13 @@ function app_brand(): array
     global $config;
     $name = trim((string)($config['app']['brand_name'] ?? '')) ?: 'Posyandu Ingin Sehat';
     $place = trim((string)($config['app']['brand_place'] ?? '')) ?: 'Dusun Dames Borneo';
-    return ['name' => $name, 'place' => $place, 'initial' => mb_strtoupper(mb_substr($name, 0, 1))];
+    // Kata pertama jadi baris atas ("Posyandu"), sisanya baris kedua ("Ingin Sehat").
+    $parts = preg_split('/\s+/', $name, 2);
+    return [
+        'name' => $name, 'place' => $place,
+        'line1' => $parts[0], 'line2' => $parts[1] ?? '',
+        'initial' => mb_strtoupper(mb_substr($name, 0, 1)),
+    ];
 }
 
 function render(string $title, callable $content, string $active = ''): void
@@ -206,7 +212,7 @@ function render(string $title, callable $content, string $active = ''): void
 <?php if ($user): ?>
 <div class="app-shell">
 <aside class="sidebar">
-    <a class="brand" href="<?= e(url()) ?>"><span class="brand-mark"><?= e($brand['initial']) ?></span><span class="brand-text"><b><?= e($brand['name']) ?></b><small><?= e($brand['place']) ?></small></span></a>
+    <a class="brand" href="<?= e(url()) ?>"><span class="brand-mark"><?= e($brand['initial']) ?></span><span class="brand-text"><b><?= e($brand['line1']) ?></b><?php if ($brand['line2'] !== ''): ?><b><?= e($brand['line2']) ?></b><?php endif; ?><small><?= e($brand['place']) ?></small></span></a>
     <nav><?php foreach ([
         '' => ['Dashboard','bi-grid'], 'balita' => ['Data Balita','bi-people'], 'pemeriksaan' => ['Pemeriksaan','bi-clipboard2-pulse'],
         'laporan' => ['Laporan','bi-file-earmark-bar-graph'], 'alat' => ['Alat IoT','bi-router'],
