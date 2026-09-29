@@ -4,6 +4,44 @@ const chart=document.querySelector('#categoryChart');
 if(chart&&window.Chart){const rows=JSON.parse(chart.dataset.values||'[]');const colors={'Sangat Pendek':'#9f2632','Pendek/Stunting':'#e36d48','Normal':'#238a70','Tinggi':'#4a8eb0'};new Chart(chart,{type:'doughnut',data:{labels:rows.map(x=>x.category),datasets:[{data:rows.map(x=>x.total),backgroundColor:rows.map(x=>colors[x.category]||'#ccc'),borderWidth:0}]},options:{cutout:'70%',plugins:{legend:{position:'bottom',labels:{boxWidth:10,usePointStyle:true}}}}})}
 document.querySelector('#voidModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
 document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
+document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.getOrCreateInstance(el).show());
+
+// Monitor alat IoT: sinkronkan status perangkat dan sensor tanpa reload.
+(function(){
+  const root=document.querySelector('[data-device-live]');
+  if(!root)return;
+  const url=root.dataset.statusUrl;
+  const sensorText=value=>value===true?'Normal':value===false?'Gangguan':'Belum ada data';
+  const sensorClass=value=>value===true?'ok':value===false?'error':'unknown';
+  async function refreshDevices(){
+    try{
+      const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'});
+      if(!response.ok)throw new Error('HTTP '+response.status);
+      const payload=await response.json();
+      (payload.devices||[]).forEach(device=>{
+        const card=root.querySelector('[data-device-id="'+device.id+'"]');
+        if(!card)return;
+        const status=card.querySelector('[data-device-status]');
+        status.textContent=device.status;
+        status.className='status status-'+device.status_color;
+        card.querySelector('[data-device-firmware]').textContent=device.firmware;
+        card.querySelector('[data-device-rssi]').textContent=device.rssi;
+        card.querySelector('[data-device-last]').textContent=device.last_seen;
+        card.querySelector('[data-device-uptime]').textContent=device.uptime;
+        Object.entries(device.sensors||{}).forEach(([key,value])=>{
+          if(key==='uptime_seconds')return;
+          const item=card.querySelector('[data-sensor="'+key+'"] .sensor-state');
+          if(!item)return;
+          item.textContent=sensorText(value);
+          item.className='sensor-state sensor-'+sensorClass(value);
+        });
+      });
+      root.classList.remove('live-error');
+    }catch(error){root.classList.add('live-error');}
+  }
+  refreshDevices();
+  setInterval(refreshDevices,5000);
+})();
 
 // Tempel RFID: minta tempel kartu di alat, lalu isi form dari scan terbaru.
 (function(){
@@ -15,7 +53,7 @@ document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.t
   const scanUrl=modalEl.dataset.scanUrl;
   const modeUrl=modalEl.dataset.modeUrl;
   const csrf=modalEl.dataset.csrf;
-  let timer=null,baseId=null,mode=null,target=null,captureActive=false;
+  let timer=null,baseId=null,mode=null,target=null,captureActive=false,returnModalEl=null;
   const setStatus=(html,cls)=>{statusEl.className='mb-1'+(cls?' '+cls:'');statusEl.innerHTML=html;};
   // Beri tahu alat: minta tempel kartu (register/select) atau batalkan (off).
   async function setDeviceMode(m){
@@ -61,6 +99,14 @@ document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.t
       mode=btn.dataset.rfidTrigger;target=btn.dataset.rfidTarget;baseId=null;
       setStatus('Menghubungi alat…');
       iconEl&&iconEl.classList.add('scanning');
+      const parentEl=btn.closest('.modal.show');
+      returnModalEl=parentEl||null;
+      if(parentEl){
+        await new Promise(resolve=>{
+          parentEl.addEventListener('hidden.bs.modal',resolve,{once:true});
+          bootstrap.Modal.getOrCreateInstance(parentEl).hide();
+        });
+      }
       modal.show();
       await poll(); // ambil titik awal scan sebelum meminta kartu
       const res=await setDeviceMode(mode==='balita'?'register':'select');
@@ -71,6 +117,13 @@ document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.t
       timer=setInterval(poll,1500);
     });
   });
-  modalEl.addEventListener('hidden.bs.modal',stop);
+  modalEl.addEventListener('hidden.bs.modal',()=>{
+    stop();
+    if(returnModalEl){
+      const parentEl=returnModalEl;
+      returnModalEl=null;
+      bootstrap.Modal.getOrCreateInstance(parentEl).show();
+    }
+  });
 })();
 

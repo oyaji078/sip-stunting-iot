@@ -28,6 +28,10 @@ $assert(GrowthService::isEligible('2024-01-01', '2026-01-01'), 'tepat 24 bulan d
 $assert(!GrowthService::isEligible('2024-01-01', '2025-12-31'), 'sebelum 24 bulan ditolak');
 $assert(!GrowthService::isEligible('2021-01-01', '2026-01-01'), 'tepat 5 tahun ditolak');
 $assert(normalize_uid('a1-b2-c3-d4') === 'A1:B2:C3:D4', 'normalisasi UID');
+$sensorData = device_sensor_data('{"rfid":true,"weight":false,"height":true,"lcd":true,"uptime_seconds":3661}');
+$assert($sensorData['rfid'] === true && $sensorData['weight'] === false, 'status kesehatan sensor');
+$assert($sensorData['uptime_seconds'] === 3661, 'uptime perangkat');
+$assert(format_uptime(3661) === '1 jam 1 menit', 'format uptime perangkat');
 
 foreach ([['L', 730], ['P', 730], ['L', 1461], ['P', 1825]] as [$sex, $age]) {
     $stmt = $pdo->prepare('SELECT l,m,s FROM who_lms WHERE sex=? AND age_days=?');

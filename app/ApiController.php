@@ -32,15 +32,16 @@ final class ApiController
 
     private function authenticate(): void
     {
-        $deviceUid = trim($_SERVER['HTTP_X_DEVICE_ID'] ?? '');
         $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-        if (!preg_match('/^Bearer\s+(.+)$/i', $auth, $matches) || $deviceUid === '') {
-            json_response(['status' => 'error', 'error' => ['code' => 'unauthorized', 'message' => 'Identitas atau token perangkat tidak tersedia.']], 401);
+        if (!preg_match('/^Bearer\s+(.+)$/i', $auth, $matches)) {
+            json_response(['status' => 'error', 'error' => ['code' => 'unauthorized', 'message' => 'Token perangkat tidak tersedia.']], 401);
         }
-        $stmt = $this->pdo->prepare('SELECT * FROM devices WHERE device_uid = ? LIMIT 1');
-        $stmt->execute([$deviceUid]);
+        // Sistem ini memakai satu alat. Token adalah identitas autentikasi
+        // sehingga penggantian board ESP32 tidak memutus koneksi ke web.
+        $stmt = $this->pdo->prepare('SELECT * FROM devices WHERE token_hash = ? LIMIT 1');
+        $stmt->execute([hash('sha256', $matches[1])]);
         $device = $stmt->fetch();
-        if (!$device || !hash_equals($device['token_hash'], hash('sha256', $matches[1]))) {
+        if (!$device) {
             json_response(['status' => 'error', 'error' => ['code' => 'unauthorized', 'message' => 'Token perangkat tidak valid.']], 401);
         }
         if (!(bool)$device['is_active']) {
@@ -54,8 +55,19 @@ final class ApiController
     {
         $firmware = $payload['firmware_version'] ?? $this->device['firmware_version'];
         $rssi = isset($payload['wifi_rssi']) ? (int)$payload['wifi_rssi'] : $this->device['wifi_rssi'];
-        $stmt = $this->pdo->prepare('UPDATE devices SET firmware_version = ?, wifi_rssi = ?, last_ip = ?, last_seen_at = NOW() WHERE id = ?');
-        $stmt->execute([$firmware, $rssi, $_SERVER['REMOTE_ADDR'] ?? null, $this->device['id']]);
+        $sensorJson = $this->device['sensor_status_json'] ?? null;
+        if (isset($payload['sensors']) && is_array($payload['sensors'])) {
+            $sensors = [];
+            foreach (['rfid', 'weight', 'height', 'lcd'] as $key) {
+                if (array_key_exists($key, $payload['sensors'])) {
+                    $sensors[$key] = (bool)$payload['sensors'][$key];
+                }
+            }
+            $sensors['uptime_seconds'] = max(0, (int)($payload['uptime_seconds'] ?? 0));
+            $sensorJson = json_encode($sensors, JSON_UNESCAPED_SLASHES);
+        }
+        $stmt = $this->pdo->prepare('UPDATE devices SET firmware_version = ?, wifi_rssi = ?, sensor_status_json = ?, last_ip = ?, last_seen_at = NOW() WHERE id = ?');
+        $stmt->execute([$firmware, $rssi, $sensorJson, $_SERVER['REMOTE_ADDR'] ?? null, $this->device['id']]);
     }
 
     private function heartbeat(array $payload): never
