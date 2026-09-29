@@ -43,13 +43,15 @@ CREATE TABLE IF NOT EXISTS devices (
     token_hash CHAR(64) NOT NULL,
     firmware_version VARCHAR(40) NULL,
     wifi_rssi SMALLINT NULL,
+    sensor_status_json JSON NULL,
     last_ip VARCHAR(45) NULL,
     last_seen_at DATETIME NULL,
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     created_by BIGINT UNSIGNED NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_devices_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+    CONSTRAINT fk_devices_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    INDEX idx_devices_token_hash (token_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS unknown_rfid_scans (

@@ -45,7 +45,11 @@ X-Device-ID: ESP32-A1B2C3D4
 Authorization: Bearer <token-yang-ditampilkan-menu-alat>
 ```
 
-Endpoint: `POST /api/v1/heartbeat`, `POST /api/v1/rfid/lookup`, dan `POST /api/v1/measurements`.
+Endpoint: `POST /api/v1/heartbeat`, `POST /api/v1/mode`, `POST /api/v1/rfid/lookup`, dan `POST /api/v1/measurements`.
+
+### Mode tangkap kartu (Tempel RFID)
+
+Tombol **Tempel RFID** (Data Balita) dan **Via RFID** (Pemeriksaan) mengaktifkan mode selama 60 detik pada tabel `settings` (`rfid_capture_mode` = `register` atau `select`). Alat membaca mode lewat `POST /api/v1/mode` saat standby (firmware 2.1.0+) dan menampilkan permintaan tempel kartu di LCD. Kartu yang ditempel saat mode aktif hanya dikirim ke web (`status: captured`) dan tidak memulai penimbangan; web mengisi form otomatis. Di luar mode ini alur pemeriksaan berjalan seperti biasa.
 
 ## Firmware
 

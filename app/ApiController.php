@@ -23,6 +23,7 @@ final class ApiController
 
         match ($endpoint) {
             'heartbeat' => $this->heartbeat($payload),
+            'mode' => $this->mode(),
             'rfid/lookup' => $this->lookup($payload),
             'measurements' => $this->measurement($payload),
             default => json_response(['status' => 'error', 'error' => ['code' => 'not_found', 'message' => 'Endpoint tidak ditemukan.']], 404),
@@ -31,15 +32,16 @@ final class ApiController
 
     private function authenticate(): void
     {
-        $deviceUid = trim($_SERVER['HTTP_X_DEVICE_ID'] ?? '');
         $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-        if (!preg_match('/^Bearer\s+(.+)$/i', $auth, $matches) || $deviceUid === '') {
-            json_response(['status' => 'error', 'error' => ['code' => 'unauthorized', 'message' => 'Identitas atau token perangkat tidak tersedia.']], 401);
+        if (!preg_match('/^Bearer\s+(.+)$/i', $auth, $matches)) {
+            json_response(['status' => 'error', 'error' => ['code' => 'unauthorized', 'message' => 'Token perangkat tidak tersedia.']], 401);
         }
-        $stmt = $this->pdo->prepare('SELECT * FROM devices WHERE device_uid = ? LIMIT 1');
-        $stmt->execute([$deviceUid]);
+        // Sistem ini memakai satu alat. Token adalah identitas autentikasi
+        // sehingga penggantian board ESP32 tidak memutus koneksi ke web.
+        $stmt = $this->pdo->prepare('SELECT * FROM devices WHERE token_hash = ? LIMIT 1');
+        $stmt->execute([hash('sha256', $matches[1])]);
         $device = $stmt->fetch();
-        if (!$device || !hash_equals($device['token_hash'], hash('sha256', $matches[1]))) {
+        if (!$device) {
             json_response(['status' => 'error', 'error' => ['code' => 'unauthorized', 'message' => 'Token perangkat tidak valid.']], 401);
         }
         if (!(bool)$device['is_active']) {
@@ -53,14 +55,59 @@ final class ApiController
     {
         $firmware = $payload['firmware_version'] ?? $this->device['firmware_version'];
         $rssi = isset($payload['wifi_rssi']) ? (int)$payload['wifi_rssi'] : $this->device['wifi_rssi'];
-        $stmt = $this->pdo->prepare('UPDATE devices SET firmware_version = ?, wifi_rssi = ?, last_ip = ?, last_seen_at = NOW() WHERE id = ?');
-        $stmt->execute([$firmware, $rssi, $_SERVER['REMOTE_ADDR'] ?? null, $this->device['id']]);
+        $sensorJson = $this->device['sensor_status_json'] ?? null;
+        if (isset($payload['sensors']) && is_array($payload['sensors'])) {
+            $sensors = [];
+            foreach (['rfid', 'weight', 'height', 'lcd'] as $key) {
+                if (array_key_exists($key, $payload['sensors'])) {
+                    $sensors[$key] = (bool)$payload['sensors'][$key];
+                }
+            }
+            $sensors['uptime_seconds'] = max(0, (int)($payload['uptime_seconds'] ?? 0));
+            $sensorJson = json_encode($sensors, JSON_UNESCAPED_SLASHES);
+        }
+        $stmt = $this->pdo->prepare('UPDATE devices SET firmware_version = ?, wifi_rssi = ?, sensor_status_json = ?, last_ip = ?, last_seen_at = NOW() WHERE id = ?');
+        $stmt->execute([$firmware, $rssi, $sensorJson, $_SERVER['REMOTE_ADDR'] ?? null, $this->device['id']]);
     }
 
     private function heartbeat(array $payload): never
     {
         $this->touchDevice($payload);
         json_response(['status' => 'success', 'server_time' => date(DATE_ATOM), 'device' => ['id' => $this->device['device_uid'], 'name' => $this->device['name']]]);
+    }
+
+    /**
+     * Mode tangkap kartu yang diminta dari web (tombol "Tempel RFID"/"Via RFID").
+     * Disimpan di tabel settings agar tanpa migrasi; kedaluwarsa 60 detik dihitung
+     * dari jam database (bukan PHP) supaya kebal beda timezone.
+     */
+    private function activeCaptureMode(): array
+    {
+        try {
+            $row = $this->pdo->query("SELECT setting_value, TIMESTAMPDIFF(SECOND, updated_at, NOW()) AS age FROM settings WHERE setting_key = 'rfid_capture_mode'")->fetch();
+        } catch (Throwable $e) {
+            return ['off', 0];
+        }
+        if (!$row || !in_array($row['setting_value'], ['register', 'select'], true)) {
+            return ['off', 0];
+        }
+        $left = 60 - (int)$row['age'];
+        return $left > 0 ? [$row['setting_value'], $left] : ['off', 0];
+    }
+
+    private function clearCaptureMode(): void
+    {
+        try {
+            $this->pdo->exec("UPDATE settings SET setting_value = 'off', updated_at = NOW() WHERE setting_key = 'rfid_capture_mode'");
+        } catch (Throwable $e) {
+            // abaikan: mode akan kedaluwarsa sendiri
+        }
+    }
+
+    private function mode(): never
+    {
+        [$mode, $left] = $this->activeCaptureMode();
+        json_response(['status' => 'success', 'mode' => $mode, 'seconds_left' => $left]);
     }
 
     private function lookup(array $payload): never
@@ -73,6 +120,16 @@ final class ApiController
         $stmt = $this->pdo->prepare('SELECT * FROM children WHERE rfid_uid = ? LIMIT 1');
         $stmt->execute([$uid]);
         $child = $stmt->fetch();
+
+        // Web sedang meminta kartu (daftar/pilih balita): tangkap UID saja,
+        // jangan mulai alur timbang di alat.
+        [$captureMode] = $this->activeCaptureMode();
+        if ($captureMode !== 'off') {
+            $this->clearCaptureMode();
+            $this->recordScan($uid, 'captured', $child ? (int)$child['id'] : null);
+            json_response(['status' => 'captured', 'mode' => $captureMode, 'uid' => $uid, 'registered' => (bool)$child]);
+        }
+
         if (!$child) {
             $stmt = $this->pdo->prepare('INSERT INTO unknown_rfid_scans (rfid_uid, device_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE scan_count = scan_count + 1, last_scanned_at = NOW()');
             $stmt->execute([$uid, $this->device['id']]);

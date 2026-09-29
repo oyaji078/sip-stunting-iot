@@ -13,6 +13,14 @@ function url(string $path = ''): string
     return rtrim($config['app']['url'], '/') . '/' . ltrim($path, '/');
 }
 
+function asset_url(string $path): string
+{
+    $path = ltrim($path, '/');
+    $file = dirname(__DIR__) . '/public/' . $path;
+    $version = is_file($file) ? (string)filemtime($file) : '1';
+    return url($path) . '?v=' . rawurlencode($version);
+}
+
 function redirect(string $path): never
 {
     header('Location: ' . ($path === '' || str_starts_with($path, 'http') ? $path : url($path)));
@@ -133,11 +141,40 @@ function time_ago(?int $seconds): string
     return intdiv($seconds, 86400) . ' hari lalu';
 }
 
+function device_sensor_data(mixed $json): array
+{
+    $defaults = ['rfid' => null, 'weight' => null, 'height' => null, 'lcd' => null, 'uptime_seconds' => 0];
+    if (!is_string($json) || $json === '') {
+        return $defaults;
+    }
+    $decoded = json_decode($json, true);
+    if (!is_array($decoded)) {
+        return $defaults;
+    }
+    foreach (['rfid', 'weight', 'height', 'lcd'] as $key) {
+        if (array_key_exists($key, $decoded)) {
+            $defaults[$key] = (bool)$decoded[$key];
+        }
+    }
+    $defaults['uptime_seconds'] = max(0, (int)($decoded['uptime_seconds'] ?? 0));
+    return $defaults;
+}
+
+function format_uptime(int $seconds): string
+{
+    if ($seconds < 60) return $seconds . ' detik';
+    if ($seconds < 3600) return intdiv($seconds, 60) . ' menit';
+    if ($seconds < 86400) return intdiv($seconds, 3600) . ' jam ' . intdiv($seconds % 3600, 60) . ' menit';
+    return intdiv($seconds, 86400) . ' hari ' . intdiv($seconds % 86400, 3600) . ' jam';
+}
+
 function rfid_scan_modal(): string
 {
     $scanUrl = e(url('rfid/scan'));
+    $modeUrl = e(url('rfid/mode'));
+    $csrf = e(csrf_token());
     return <<<HTML
-<div class="modal fade" id="rfidModal" tabindex="-1" data-scan-url="{$scanUrl}"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Tempelkan kartu RFID</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body text-center"><div class="rfid-wait" data-rfid-icon>⌁</div><p class="mb-1" data-rfid-status>Silakan tempelkan kartu RFID pada alat…</p><small class="text-muted">Alat harus online dan terhubung ke internet.</small></div></div></div></div>
+<div class="modal fade" id="rfidModal" tabindex="-1" data-scan-url="{$scanUrl}" data-mode-url="{$modeUrl}" data-csrf="{$csrf}"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Tempelkan kartu RFID</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body text-center"><div class="rfid-wait" data-rfid-icon>⌁</div><p class="mb-1" data-rfid-status>Silakan tempelkan kartu RFID pada alat…</p><small class="text-muted">Alat harus online dan terhubung ke internet.</small></div></div></div></div>
 HTML;
 }
 
@@ -151,7 +188,7 @@ function render(string $title, callable $content, string $active = ''): void
     <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <title><?= e($title) ?> · <?= e($config['app']['name']) ?></title>
     <link rel="stylesheet" href="<?= e(url('assets/vendor/bootstrap.min.css')) ?>">
-    <link rel="stylesheet" href="<?= e(url('assets/app.css')) ?>">
+    <link rel="stylesheet" href="<?= e(asset_url('assets/app.css')) ?>">
 </head><body>
 <?php if ($user): ?>
 <div class="app-shell">
@@ -174,7 +211,7 @@ function render(string $title, callable $content, string $active = ''): void
 </main><?php if ($user): ?></div><?php endif; ?>
 <script src="<?= e(url('assets/vendor/bootstrap.bundle.min.js')) ?>"></script>
 <script src="<?= e(url('assets/vendor/chart.umd.min.js')) ?>"></script>
-<script src="<?= e(url('assets/app.js')) ?>"></script>
+<script src="<?= e(asset_url('assets/app.js')) ?>"></script>
 </body></html><?php
 }
 
