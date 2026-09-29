@@ -53,5 +53,16 @@ $assert(GrowthService::category(-2.0) === 'Normal', 'batas -2');
 $assert(GrowthService::category(3.0) === 'Normal', 'batas +3');
 $assert(GrowthService::category(3.0001) === 'Tinggi', 'batas tinggi');
 
+// Redirect: path kosong harus ke beranda, bukan header Location kosong
+// (bug yang membuat login berhasil tetapi tetap berada di halaman masuk).
+$config = ['app' => ['url' => 'https://posyandu.oypoint.online']];
+$assert(redirect_target('') === 'https://posyandu.oypoint.online/', 'redirect path kosong menuju beranda');
+$assert(redirect_target('') !== '', 'redirect path kosong tidak boleh kosong');
+$assert(redirect_target('login') === 'https://posyandu.oypoint.online/login', 'redirect path biasa');
+$assert(redirect_target('ubah-password') === 'https://posyandu.oypoint.online/ubah-password', 'redirect ubah-password');
+$assert(redirect_target('https://contoh.test/x') === 'https://contoh.test/x', 'redirect URL absolut tidak diubah');
+$config = ['app' => ['url' => 'https://contoh.test/sub/']];
+$assert(redirect_target('') === 'https://contoh.test/sub/', 'redirect beranda dengan subfolder');
+
 echo "OK - {$tests} pengujian lulus\n";
 

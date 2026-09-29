@@ -1,0 +1,62 @@
+name: Build firmware ESP32
+
+# Mengompilasi esp32-fw dengan PlatformIO di runner GitHub agar kode terbukti
+# bisa dibangun tanpa laptop. Hasil firmware.bin tersedia sebagai artifact.
+on:
+  push:
+    paths:
+      - "esp32-fw/**"
+      - ".github/workflows/firmware.yml"
+  pull_request:
+    paths:
+      - "esp32-fw/**"
+      - ".github/workflows/firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache paket PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('esp32-fw/platformio.ini') }}
+
+      - name: Pasang PlatformIO
+        run: pip install platformio
+
+      - name: Build
+        run: pio run -d esp32-fw
+
+      - name: Ringkasan hasil
+        run: |
+          BIN=esp32-fw/.pio/build/esp32dev/firmware.bin
+          {
+            echo "### Firmware ESP32"
+            echo "- Versi di kode: \`$(grep -m1 'FIRMWARE_VERSION =' esp32-fw/src/main.ino | sed 's/.*= *//; s/[";]//g')\`"
+            echo "- Ukuran firmware.bin: $(stat -c%s "$BIN") byte"
+            echo "- SHA-256: \`$(sha256sum "$BIN" | cut -d' ' -f1)\`"
+            echo "- Alamat flash aplikasi: \`0x10000\` (NVS berisi token dan WiFi tidak tersentuh)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Simpan hasil build
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32
+          path: |
+            esp32-fw/.pio/build/esp32dev/firmware.bin
+            esp32-fw/.pio/build/esp32dev/bootloader.bin
+            esp32-fw/.pio/build/esp32dev/partitions.bin
+          if-no-files-found: error
+          retention-days: 30

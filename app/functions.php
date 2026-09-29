@@ -21,9 +21,19 @@ function asset_url(string $path): string
     return url($path) . '?v=' . rawurlencode($version);
 }
 
+/**
+ * Tujuan redirect. Path kosong berarti beranda (dashboard). Sebelumnya path
+ * kosong dikirim apa adanya sebagai "Location: " kosong, sehingga setelah login
+ * berhasil browser tetap berada di halaman masuk.
+ */
+function redirect_target(string $path): string
+{
+    return str_starts_with($path, 'http') ? $path : url($path);
+}
+
 function redirect(string $path): never
 {
-    header('Location: ' . ($path === '' || str_starts_with($path, 'http') ? $path : url($path)));
+    header('Location: ' . redirect_target($path));
     exit;
 }
 
