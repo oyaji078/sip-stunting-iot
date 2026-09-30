@@ -535,8 +535,42 @@ void beepAlreadyRegistered()
   }
 }
 
-// Melodi khas yang hanya dimainkan ketika seluruh pemeriksaan selesai.
-void beepFinished()
+// Bunyi sangat singkat: kartu baru saja terbaca secara lokal.
+void beepCardDetected()
+{
+  buzzerOn(4800);
+  delay(65);
+  buzzerOff();
+}
+
+// Dua nada rendah-menengah: data berat sudah stabil dan terkunci.
+void beepWeightLocked()
+{
+  buzzerOn(1800);
+  delay(130);
+  buzzerOff();
+  delay(75);
+  buzzerOn(2600);
+  delay(190);
+  buzzerOff();
+}
+
+// Tiga nada naik: data tinggi sudah stabil dan terkunci.
+void beepHeightLocked()
+{
+  const int notes[] = {2600, 3400, 4200};
+  const int durations[] = {90, 110, 230};
+  for (int i = 0; i < 3; i++)
+  {
+    buzzerOn(notes[i]);
+    delay(durations[i]);
+    buzzerOff();
+    if (i < 2) delay(65);
+  }
+}
+
+// Empat nada khas: hasil server sudah tampil dan pemeriksaan selesai.
+void beepResultReady()
 {
   const int notes[] = {2200, 3000, 3900, 5000};
   const int durations[] = {120, 120, 150, 350};
@@ -654,8 +688,8 @@ int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
 
     HTTPClient http;
     http.setReuse(true);
-    http.setConnectTimeout(5000);
-  http.setTimeout(3000);
+    http.setConnectTimeout(2500);
+    http.setTimeout(2000);
     if (!http.begin(secureClient, url)) return -1;
 
     http.addHeader("Content-Type", "application/json");
@@ -1140,7 +1174,7 @@ void showWeightLock()
   lcdPrintLine(2, "Silakan berdiri");
   lcdPrintLine(3, "Mengukur tinggi...");
 
-  beepDouble();
+  beepWeightLocked();
 }
 
 // =============================================================
@@ -1296,8 +1330,6 @@ void showZScoreResult()
     finalCategory
   );
 
-  beepSuccess();
-
   // Hasil Z-Score tetap ditampilkan
   delay(5000);
 }
@@ -1381,7 +1413,7 @@ void showFinish()
   lcdPrintLine(2, "");
   lcdPrintLine(3, "Silakan turun...");
 
-  beepFinished();
+  beepResultReady();
 
   // Jangan langsung kembali standby.
   // Sistem menunggu anak turun dari timbangan.
@@ -1935,7 +1967,7 @@ void loop()
     );
 
     // Umpan balik lokal langsung, tanpa menunggu respons HTTPS.
-    beepShort();
+    beepCardDetected();
 
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
@@ -2156,6 +2188,8 @@ void loop()
         " cm"
       );
 
+      beepHeightLocked();
+
       lcdClear();
 
       lcdPrintLine(
@@ -2212,8 +2246,6 @@ void loop()
 
         return;
       }
-
-      beepSuccess();
 
       currentState =
         STATE_RESULT_Z;
