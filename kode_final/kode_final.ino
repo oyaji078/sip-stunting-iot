@@ -89,7 +89,7 @@
 // =============================================================
 
 const char* API_BASE_URL = "https://posyandu.oypoint.online/api/v1";
-const char* FIRMWARE_VERSION = "2.1.1";
+const char* FIRMWARE_VERSION = "2.1.0";
 
 // ISRG Root X1 (Let's Encrypt), valid until 2035.
 const char* ROOT_CA = R"EOF(
