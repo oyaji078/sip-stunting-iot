@@ -81,6 +81,10 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #include "HX711.h"
 #include <VL53L1X.h>
 
@@ -135,6 +139,7 @@ int authFailureCount = 0;
 // dan kartu RFID terasa sangat lambat terbaca.
 WiFiClientSecure secureClient;
 bool secureClientReady = false;
+SemaphoreHandle_t apiMutex = nullptr;
 unsigned long lastHeartbeatAt = 0;
 unsigned long lastPendingRetryAt = 0;
 bool pendingMeasurement = false;
@@ -165,6 +170,36 @@ enum RFIDCheckResult
   RFID_CAPTURED_REGISTERED,
   RFID_API_ERROR
 };
+
+// FIX: non-blocking - UID ditampung di RAM dan dikirim oleh task Core 0.
+// String aman dipakai di sini karena ring buffer tidak disalin byte-per-byte
+// oleh FreeRTOS; seluruh aksesnya dilindungi mutex.
+struct QueueData
+{
+  String uid;
+  unsigned long timestamp;
+};
+
+struct RFIDResultData
+{
+  RFIDCheckResult result;
+  char uid[40];
+  char childName[64];
+  char childSex[8];
+  int childAgeMonth;
+  unsigned long timestamp;
+};
+
+const uint8_t RFID_QUEUE_CAPACITY = 20;
+QueueData rfidUploadQueue[RFID_QUEUE_CAPACITY];
+uint8_t rfidQueueHead = 0;
+uint8_t rfidQueueTail = 0;
+uint8_t rfidQueueCount = 0;
+SemaphoreHandle_t rfidQueueMutex = nullptr;
+QueueHandle_t rfidResultQueue = nullptr;
+TaskHandle_t taskRFIDHandle = nullptr;
+TaskHandle_t taskUploadHandle = nullptr;
+RFIDCheckResult queuedRFIDResult = RFID_API_ERROR;
 
 // =============================================================
 // PIN
@@ -265,8 +300,6 @@ String childSex  = "";
 
 int childAgeMonth = 0;
 
-bool childRegistered = false;
-
 // =============================================================
 // VARIABEL HASIL PEMERIKSAAN
 // =============================================================
@@ -296,7 +329,7 @@ enum SystemState
   STATE_FINISH
 };
 
-SystemState currentState = STATE_STANDBY;
+volatile SystemState currentState = STATE_STANDBY;
 
 // =============================================================
 // TIMER
@@ -664,8 +697,18 @@ bool ensureWiFi()
 
 int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
 {
-  if (!ensureWiFi() || deviceToken.length() < 32)
+  if (deviceToken.length() < 32)
     return -1;
+
+  // FIX: non-blocking - semua HTTPS berjalan di luar task RFID. Mutex ini
+  // mencegah heartbeat, mode web, dan upload memakai TLS client bersamaan.
+  if (apiMutex && xSemaphoreTake(apiMutex, portMAX_DELAY) != pdTRUE)
+    return -1;
+
+  if (!ensureWiFi()) {
+    if (apiMutex) xSemaphoreGive(apiMutex);
+    return -1;
+  }
 
   if (!secureClientReady) {
     secureClient.setCACert(ROOT_CA);
@@ -690,7 +733,10 @@ int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
     http.setReuse(true);
     http.setConnectTimeout(2500);
     http.setTimeout(2000);
-    if (!http.begin(secureClient, url)) return -1;
+    if (!http.begin(secureClient, url)) {
+      if (apiMutex) xSemaphoreGive(apiMutex);
+      return -1;
+    }
 
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Accept", "application/json");
@@ -705,6 +751,8 @@ int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
     secureClient.stop(); // koneksi rusak: buang dan buka yang baru
     if (!reused) break;  // sudah koneksi baru, tidak perlu diulang
   }
+
+  if (apiMutex) xSemaphoreGive(apiMutex);
 
   if (code == 401 || code == 403) {
     authFailureCount++;
@@ -870,8 +918,17 @@ String readRFIDUID()
 // CEK RFID KE API
 // =============================================================
 
-RFIDCheckResult checkRFID(String uid)
+RFIDCheckResult checkRFID(
+  const String &uid,
+  String &resultName,
+  String &resultSex,
+  int &resultAgeMonth
+)
 {
+  resultName = "";
+  resultSex = "";
+  resultAgeMonth = 0;
+
   JsonDocument request;
   JsonDocument response;
   request["uid"] = uid;
@@ -880,7 +937,6 @@ RFIDCheckResult checkRFID(String uid)
 
   String status = response["status"] | "error";
   if (status == "captured") {
-    childRegistered = false;
     String capturedFor = response["mode"] | "";
     bool alreadyRegistered = response["registered"] | false;
     if (capturedFor == "register" && alreadyRegistered)
@@ -888,13 +944,11 @@ RFIDCheckResult checkRFID(String uid)
     return RFID_CAPTURED;
   }
   if (status == "registered") {
-    childRegistered = true;
-    childName = response["child"]["name"].as<String>();
-    childSex = response["child"]["sex"].as<String>();
-    childAgeMonth = response["child"]["age_days"].as<int>() / 30;
+    resultName = response["child"]["name"].as<String>();
+    resultSex = response["child"]["sex"].as<String>();
+    resultAgeMonth = response["child"]["age_days"].as<int>() / 30;
     return RFID_REGISTERED;
   }
-  childRegistered = false;
   if (status == "unknown") return RFID_UNKNOWN;
   if (status == "ineligible" || status == "inactive") return RFID_INELIGIBLE;
   return RFID_API_ERROR;
@@ -1523,15 +1577,14 @@ void showCaptureAlreadyRegistered()
   delay(3000);
 }
 
-// Umpan balik instan begitu UID terbaca, SEBELUM menunggu jaringan/server,
-// supaya pengguna langsung tahu kartunya sudah terbaca.
-void showCardDetected()
+// FIX: non-blocking - dipanggil langsung oleh task RFID sebelum antrean
+// disentuh task upload. Tidak ada HTTP dan tidak ada delay di fungsi ini.
+void showCardDetected(const String &uid)
 {
   lcdPrintLine(0, "KARTU TERBACA");
-  lcdPrintLine(1, currentUID);
-  lcdPrintLine(2, captureMode != "off" ? "Mengirim ke website" : "Memeriksa data...");
+  lcdPrintLine(1, uid);
+  lcdPrintLine(2, "Masuk antrean");
   lcdPrintLine(3, "");
-  beepShort();
 }
 
 // =============================================================
@@ -1731,6 +1784,10 @@ bool initRFID()
     RFID_SS
   );
 
+  // FIX: non-blocking - library MFRC522 memakai SPI 4 MHz secara default.
+  // Catat di Serial agar konfigurasi kecepatan mudah diverifikasi saat boot.
+  Serial.println("RFID SPI: 4 MHz");
+
   rfid.PCD_Init();
   delay(50);
 
@@ -1781,12 +1838,171 @@ bool isLCDReady()
 }
 
 // =============================================================
+// FIX: non-blocking - RING BUFFER RFID DAN TASK FREERTOS
+// =============================================================
+
+bool enqueueRFID(const String &uid, unsigned long timestamp)
+{
+  if (!rfidQueueMutex || xSemaphoreTake(rfidQueueMutex, pdMS_TO_TICKS(20)) != pdTRUE)
+    return false;
+
+  if (rfidQueueCount >= RFID_QUEUE_CAPACITY) {
+    xSemaphoreGive(rfidQueueMutex);
+    Serial.println("RFID queue penuh, kartu tidak dimasukkan");
+    return false;
+  }
+
+  rfidUploadQueue[rfidQueueTail].uid = uid;
+  rfidUploadQueue[rfidQueueTail].timestamp = timestamp;
+  rfidQueueTail = (rfidQueueTail + 1) % RFID_QUEUE_CAPACITY;
+  rfidQueueCount++;
+  uint8_t countNow = rfidQueueCount;
+  xSemaphoreGive(rfidQueueMutex);
+
+  Serial.printf("RFID queue: %u/%u\n", countNow, RFID_QUEUE_CAPACITY);
+  return true;
+}
+
+bool peekRFID(QueueData &data)
+{
+  if (!rfidQueueMutex || xSemaphoreTake(rfidQueueMutex, pdMS_TO_TICKS(20)) != pdTRUE)
+    return false;
+
+  bool available = rfidQueueCount > 0;
+  if (available) data = rfidUploadQueue[rfidQueueHead];
+  xSemaphoreGive(rfidQueueMutex);
+  return available;
+}
+
+void popRFID()
+{
+  if (!rfidQueueMutex || xSemaphoreTake(rfidQueueMutex, pdMS_TO_TICKS(20)) != pdTRUE)
+    return;
+
+  if (rfidQueueCount > 0) {
+    rfidUploadQueue[rfidQueueHead].uid = "";
+    rfidQueueHead = (rfidQueueHead + 1) % RFID_QUEUE_CAPACITY;
+    rfidQueueCount--;
+  }
+  xSemaphoreGive(rfidQueueMutex);
+}
+
+void taskRFID(void *parameter)
+{
+  (void)parameter;
+  Serial.printf("taskRFID aktif di Core %d\n", xPortGetCoreID());
+
+  for (;;) {
+    if (currentState != STATE_STANDBY || pendingMeasurement) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    recoverRFIDIfNeeded();
+
+    if (!rfidReady) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    if (!rfid.PICC_IsNewCardPresent()) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+
+    unsigned long detectedAt = millis();
+    if (!rfid.PICC_ReadCardSerial()) {
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+
+    String uid = readRFIDUID();
+
+    // Selesaikan transaksi SPI segera; tidak ada delay setelah pembacaan.
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+
+    // Respons lokal selalu lebih dahulu daripada akses jaringan.
+    beepCardDetected();
+    showCardDetected(uid);
+    bool queued = enqueueRFID(uid, millis());
+
+    unsigned long responseMs = millis() - detectedAt;
+    Serial.printf("Card detected in %lu ms | UID: %s | queued: %s\n",
+                  responseMs, uid.c_str(), queued ? "yes" : "no");
+
+    // Debounce pendek dan non-blocking untuk task lain.
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+}
+
+void taskUpload(void *parameter)
+{
+  (void)parameter;
+  Serial.printf("taskUpload aktif di Core %d\n", xPortGetCoreID());
+
+  for (;;) {
+    QueueData item;
+    if (!peekRFID(item)) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+
+    // WiFi mati tidak boleh menahan task RFID. Coba lagi lima detik kemudian.
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.reconnect();
+      Serial.println("Upload RFID ditunda: WiFi terputus");
+      vTaskDelay(pdMS_TO_TICKS(5000));
+      continue;
+    }
+
+    String resultName;
+    String resultSex;
+    int resultAgeMonth = 0;
+    RFIDCheckResult result = checkRFID(
+      item.uid,
+      resultName,
+      resultSex,
+      resultAgeMonth
+    );
+
+    if (result == RFID_API_ERROR) {
+      Serial.println("Upload RFID gagal, retry 5 detik");
+      vTaskDelay(pdMS_TO_TICKS(5000));
+      continue;
+    }
+
+    RFIDResultData completed = {};
+    completed.result = result;
+    completed.timestamp = item.timestamp;
+    completed.childAgeMonth = resultAgeMonth;
+    strlcpy(completed.uid, item.uid.c_str(), sizeof(completed.uid));
+    strlcpy(completed.childName, resultName.c_str(), sizeof(completed.childName));
+    strlcpy(completed.childSex, resultSex.c_str(), sizeof(completed.childSex));
+
+    // Bila state machine sedang menimbang, hasil menunggu di queue ini.
+    xQueueSend(rfidResultQueue, &completed, portMAX_DELAY);
+    popRFID();
+    Serial.printf("RFID terkirim di background | UID: %s\n", item.uid.c_str());
+  }
+}
+
+// =============================================================
 // SETUP
 // =============================================================
 
 void setup()
 {
   Serial.begin(115200);
+
+  // FIX: non-blocking - queue dan mutex dibuat sebelum task/perangkat aktif.
+  rfidQueueMutex = xSemaphoreCreateMutex();
+  apiMutex = xSemaphoreCreateMutex();
+  rfidResultQueue = xQueueCreate(RFID_QUEUE_CAPACITY, sizeof(RFIDResultData));
+  if (!rfidQueueMutex || !apiMutex || !rfidResultQueue) {
+    Serial.println("FATAL: alokasi queue/mutex RFID gagal");
+    while (true) delay(1000);
+  }
 
   preferences.begin("sip-stunting", false);
   deviceToken = preferences.getString("device_token", "");
@@ -1864,9 +2080,37 @@ void setup()
 
   rfidReady = initRFID();
 
+  // FIX: non-blocking - pembaca RFID hidup di Core 1 bahkan saat koneksi
+  // WiFi/portal konfigurasi masih menunggu.
+  BaseType_t rfidTaskCreated = xTaskCreatePinnedToCore(
+    taskRFID,
+    "taskRFID",
+    6144,
+    nullptr,
+    3,
+    &taskRFIDHandle,
+    1
+  );
+  if (rfidTaskCreated != pdPASS)
+    Serial.println("FATAL: taskRFID gagal dibuat");
+
   // ---------------- WIFI ----------------
 
   connectWiFi();
+
+  // FIX: non-blocking - semua lookup kartu/API dikerjakan Core 0 dengan
+  // prioritas lebih rendah daripada pembacaan RFID.
+  BaseType_t uploadTaskCreated = xTaskCreatePinnedToCore(
+    taskUpload,
+    "taskUpload",
+    12288,
+    nullptr,
+    1,
+    &taskUploadHandle,
+    0
+  );
+  if (uploadTaskCreated != pdPASS)
+    Serial.println("FATAL: taskUpload gagal dibuat");
 
   // ---------------- STANDBY ----------------
 
@@ -1922,62 +2166,21 @@ void loop()
 
   if (currentState == STATE_STANDBY)
   {
-    // Tunggu kartu RFID
-
-    recoverRFIDIfNeeded();
-
-    if (
-      !rfid.PICC_IsNewCardPresent()
-    )
-    {
-      // Tidak ada kartu: sekalian cek apakah website meminta kartu.
-      pollCaptureMode();
+    // FIX: non-blocking - loop hanya mengambil hasil yang sudah selesai dari
+    // taskUpload. Pembacaan kartu sendiri berlangsung terus di taskRFID.
+    RFIDResultData completed;
+    if (xQueueReceive(rfidResultQueue, &completed, 0) == pdTRUE) {
+      currentUID = String(completed.uid);
+      childName = String(completed.childName);
+      childSex = String(completed.childSex);
+      childAgeMonth = completed.childAgeMonth;
+      queuedRFIDResult = completed.result;
+      currentState = STATE_CHECK_RFID;
       return;
     }
 
-    if (
-      !rfid.PICC_ReadCardSerial()
-    )
-    {
-      // Gangguan singkat pada kartu/bus tidak perlu menggagalkan tap pertama.
-      delay(5);
-      if (!rfid.PICC_ReadCardSerial())
-        return;
-    }
-
-    currentUID =
-      readRFIDUID();
-
-    Serial.println();
-    Serial.println(
-      "================================"
-    );
-
-    Serial.println(
-      "RFID TERBACA"
-    );
-
-    Serial.println(
-      "UID: " +
-      currentUID
-    );
-
-    Serial.println(
-      "================================"
-    );
-
-    // Umpan balik lokal langsung, tanpa menunggu respons HTTPS.
-    beepCardDetected();
-
-    rfid.PICC_HaltA();
-    rfid.PCD_StopCrypto1();
-
-    // Beri tahu pengguna sekarang juga; pengecekan ke server menyusul.
-    showCardDetected();
-
-    currentState =
-      STATE_CHECK_RFID;
-
+    // Poll web boleh lambat; task RFID berprioritas tinggi tetap bisa preempt.
+    pollCaptureMode();
     return;
   }
 
@@ -1987,8 +2190,8 @@ void loop()
 
   if (currentState == STATE_CHECK_RFID)
   {
-    RFIDCheckResult result =
-      checkRFID(currentUID);
+    // FIX: non-blocking - hasil ini sudah dihitung taskUpload di Core 0.
+    RFIDCheckResult result = queuedRFIDResult;
 
     if (result == RFID_CAPTURED_REGISTERED) {
       showCaptureAlreadyRegistered();
