@@ -152,7 +152,7 @@ bool lcdReady = false;
 // ditempel hanya dikirim ke web dan TIDAK memulai penimbangan.
 String captureMode = "off";
 unsigned long lastModePollAt = 0;
-unsigned long modePollInterval = 2000;
+unsigned long modePollInterval = 1000;
 unsigned long lastRFIDHealthCheckAt = 0;
 const unsigned long RFID_HEALTH_CHECK_INTERVAL = 5000;
 
@@ -162,6 +162,7 @@ enum RFIDCheckResult
   RFID_UNKNOWN,
   RFID_INELIGIBLE,
   RFID_CAPTURED,
+  RFID_CAPTURED_REGISTERED,
   RFID_API_ERROR
 };
 
@@ -519,6 +520,35 @@ void beepError()
   }
 }
 
+// Peringatan khusus saat kartu yang ditempel pada mode pendaftaran
+// ternyata sudah terhubung dengan balita lain.
+void beepAlreadyRegistered()
+{
+  for (int i = 0; i < 2; i++)
+  {
+    buzzerOn(3600);
+    delay(120);
+    buzzerOn(1700);
+    delay(220);
+    buzzerOff();
+    if (i == 0) delay(100);
+  }
+}
+
+// Melodi khas yang hanya dimainkan ketika seluruh pemeriksaan selesai.
+void beepFinished()
+{
+  const int notes[] = {2200, 3000, 3900, 5000};
+  const int durations[] = {120, 120, 150, 350};
+  for (int i = 0; i < 4; i++)
+  {
+    buzzerOn(notes[i]);
+    delay(durations[i]);
+    buzzerOff();
+    if (i < 3) delay(70);
+  }
+}
+
 // =============================================================
 // WIFI
 // =============================================================
@@ -625,7 +655,7 @@ int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
     HTTPClient http;
     http.setReuse(true);
     http.setConnectTimeout(5000);
-    http.setTimeout(6000);
+  http.setTimeout(3000);
     if (!http.begin(secureClient, url)) return -1;
 
     http.addHeader("Content-Type", "application/json");
@@ -817,6 +847,10 @@ RFIDCheckResult checkRFID(String uid)
   String status = response["status"] | "error";
   if (status == "captured") {
     childRegistered = false;
+    String capturedFor = response["mode"] | "";
+    bool alreadyRegistered = response["registered"] | false;
+    if (capturedFor == "register" && alreadyRegistered)
+      return RFID_CAPTURED_REGISTERED;
     return RFID_CAPTURED;
   }
   if (status == "registered") {
@@ -1347,7 +1381,7 @@ void showFinish()
   lcdPrintLine(2, "");
   lcdPrintLine(3, "Silakan turun...");
 
-  beepSuccess();
+  beepFinished();
 
   // Jangan langsung kembali standby.
   // Sistem menunggu anak turun dari timbangan.
@@ -1417,10 +1451,10 @@ void pollCaptureMode()
   request["ping"] = 1; // body harus objek JSON; dokumen kosong terkirim sebagai "null"
   int code = apiPost("mode", request, response);
   if (code != 200) {
-    modePollInterval = 15000;
+    modePollInterval = 5000;
     return;
   }
-  modePollInterval = 2000;
+  modePollInterval = 1000;
 
   String newMode = response["mode"] | "off";
   if (newMode != "register" && newMode != "select") newMode = "off";
@@ -1443,6 +1477,18 @@ void showCaptureDone()
 
   beepSuccess();
   delay(1200);
+}
+
+void showCaptureAlreadyRegistered()
+{
+  lcdClear();
+  lcdPrintLine(0, "KARTU SUDAH");
+  lcdPrintLine(1, "TERDAFTAR");
+  lcdPrintLine(2, currentUID);
+  lcdPrintLine(3, "Pilih kartu lain");
+
+  beepAlreadyRegistered();
+  delay(3000);
 }
 
 // Umpan balik instan begitu UID terbaca, SEBELUM menunggu jaringan/server,
@@ -1823,7 +1869,7 @@ void loop()
     lcdPrintLine(1, "Menunggu internet...");
     lcdPrintLine(2, pendingUid);
     lcdPrintLine(3, "Jangan ukur dahulu");
-    if (millis() - lastPendingRetryAt >= 15000 || lastPendingRetryAt == 0) {
+    if (millis() - lastPendingRetryAt >= 5000 || lastPendingRetryAt == 0) {
       lastPendingRetryAt = millis();
       if (submitMeasurement(pendingUid, pendingWeight, pendingHeight, pendingRequestId)) {
         clearPendingMeasurement();
@@ -1888,6 +1934,9 @@ void loop()
       "================================"
     );
 
+    // Umpan balik lokal langsung, tanpa menunggu respons HTTPS.
+    beepShort();
+
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
 
@@ -1908,6 +1957,16 @@ void loop()
   {
     RFIDCheckResult result =
       checkRFID(currentUID);
+
+    if (result == RFID_CAPTURED_REGISTERED) {
+      showCaptureAlreadyRegistered();
+      captureMode = "off";
+      lastModePollAt = millis();
+      currentUID = "";
+      currentState = STATE_STANDBY;
+      showStandby();
+      return;
+    }
 
     if (result == RFID_CAPTURED) {
       // Website meminta kartu (daftar/pilih balita): UID sudah dikirim,

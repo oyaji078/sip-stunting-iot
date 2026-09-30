@@ -91,6 +91,17 @@ if ($path === 'logout') {
 $user = require_auth();
 if ($user['must_change_password'] && $path !== 'ubah-password') redirect('ubah-password');
 
+// Versi ringan untuk membuat halaman operator otomatis mengikuti perubahan
+// data dari perangkat atau pengguna lain tanpa WebSocket.
+if ($path === 'live/version') {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    $childVersion = $pdo->query("SELECT COUNT(*) total, COALESCE(UNIX_TIMESTAMP(MAX(updated_at)),0) changed FROM children")->fetch();
+    $measurementVersion = $pdo->query("SELECT COUNT(*) total, COALESCE(UNIX_TIMESTAMP(MAX(GREATEST(created_at,COALESCE(approved_at,'1970-01-01'),COALESCE(voided_at,'1970-01-01')))),0) changed FROM measurements")->fetch();
+    echo json_encode(['version' => hash('sha256', json_encode([$childVersion, $measurementVersion]))]);
+    exit;
+}
+
 if ($path === 'ubah-password') {
     if ($method === 'POST') {
         verify_csrf(); $password = (string)($_POST['password'] ?? '');
@@ -203,17 +214,16 @@ if ($path === 'balita/hapus' && $method === 'POST') {
         $s = $pdo->prepare('SELECT id, name, rfid_uid FROM children WHERE id = ?'); $s->execute([$id]); $child = $s->fetch();
         if (!$child) throw new DomainException('Data balita tidak ditemukan.');
         $s = $pdo->prepare('SELECT COUNT(*) FROM measurements WHERE child_id = ?'); $s->execute([$id]); $count = (int)$s->fetchColumn();
-        if ($count > 0 && empty($_POST['confirm_history'])) {
-            throw new DomainException("Balita ini punya {$count} riwayat pemeriksaan. Centang konfirmasi untuk menghapus data balita beserta riwayatnya.");
+        if ($count > 0) {
+            $pdo->prepare('UPDATE children SET is_active = 0 WHERE id = ?')->execute([$id]);
+            audit('archive_child', 'child', $id, ['name' => $child['name'], 'measurement_count' => $count]);
+            flash('success', 'Data balita "' . $child['name'] . '" dinonaktifkan. ' . $count . ' riwayat pemeriksaan tetap tersimpan.');
+        } else {
+            $pdo->prepare('DELETE FROM children WHERE id = ?')->execute([$id]);
+            $pdo->prepare('UPDATE unknown_rfid_scans SET resolved_child_id = NULL, resolved_at = NULL WHERE rfid_uid = ?')->execute([$child['rfid_uid']]);
+            audit('delete_child', 'child', $id, ['name' => $child['name'], 'rfid_uid' => $child['rfid_uid']]);
+            flash('success', 'Data balita "' . $child['name'] . '" berhasil dihapus.');
         }
-        $pdo->beginTransaction();
-        $pdo->prepare('DELETE FROM measurements WHERE child_id = ?')->execute([$id]);
-        $pdo->prepare('DELETE FROM children WHERE id = ?')->execute([$id]);
-        // Kartu yang tadinya terdaftar kembali menjadi "belum terdaftar" agar bisa didaftarkan ulang.
-        $pdo->prepare('UPDATE unknown_rfid_scans SET resolved_child_id = NULL, resolved_at = NULL WHERE rfid_uid = ?')->execute([$child['rfid_uid']]);
-        $pdo->commit();
-        audit('delete_child', 'child', $id, ['name' => $child['name'], 'rfid_uid' => $child['rfid_uid'], 'measurements_deleted' => $count]);
-        flash('success', 'Data balita "' . $child['name'] . '" dihapus' . ($count ? " beserta {$count} riwayat pemeriksaan." : '.'));
     } catch (DomainException $e) {
         flash('danger', $e->getMessage());
     } catch (Throwable $e) {
@@ -224,16 +234,40 @@ if ($path === 'balita/hapus' && $method === 'POST') {
     redirect('balita');
 }
 
+if ($path === 'balita/perkembangan') {
+    $id = (int)($_GET['id'] ?? 0);
+    $s = $pdo->prepare('SELECT * FROM children WHERE id = ?');
+    $s->execute([$id]);
+    $child = $s->fetch();
+    if (!$child) { flash('danger', 'Data balita tidak ditemukan.'); redirect('balita'); }
+    $s = $pdo->prepare("SELECT measured_at, age_days, weight_kg, height_cm, z_score, category, source FROM measurements WHERE child_id = ? AND status = 'approved' AND voided_at IS NULL ORDER BY measured_at");
+    $s->execute([$id]);
+    $history = $s->fetchAll();
+    $latest = $history ? $history[count($history) - 1] : null;
+    $chartRows = array_map(static fn(array $r): array => [
+        'date' => date('d/m/Y', strtotime($r['measured_at'])),
+        'weight' => (float)$r['weight_kg'], 'height' => (float)$r['height_cm'],
+        'z' => (float)$r['z_score'],
+    ], $history);
+    render('Perkembangan ' . $child['name'], function() use($child,$history,$latest,$chartRows){ ?>
+    <div class="page-actions"><div><h2><?= e($child['name']) ?></h2><p><?= e($child['sex']==='L'?'Laki-laki':'Perempuan') ?> · lahir <?= e(date('d/m/Y',strtotime($child['birth_date']))) ?> · <code><?= e($child['rfid_uid']) ?></code></p></div><a class="btn btn-light" href="<?= e(url('balita')) ?>">Kembali</a></div>
+    <?php if($latest): ?><div class="stats-grid mb-4"><div class="stat-card"><span class="dot bg-primary"></span><div><small>Berat terakhir</small><strong><?= e(number_format((float)$latest['weight_kg'],2)) ?> kg</strong></div></div><div class="stat-card"><span class="dot bg-info"></span><div><small>Tinggi terakhir</small><strong><?= e(number_format((float)$latest['height_cm'],2)) ?> cm</strong></div></div><div class="stat-card"><span class="dot bg-warning"></span><div><small>Z-score terakhir</small><strong><?= e(number_format((float)$latest['z_score'],2)) ?> SD</strong></div></div><div class="stat-card"><span class="dot bg-success"></span><div><small>Kategori terakhir</small><strong class="summary-category"><?= e($latest['category']) ?></strong></div></div></div><?php endif; ?>
+    <div class="row g-4"><div class="col-xl-7"><div class="card panel h-100"><div class="card-header"><h2>Perkembangan berat dan tinggi</h2><small><?= e(count($history)) ?> pemeriksaan</small></div><div class="card-body chart-tall"><canvas id="growthChart" data-values='<?= e(json_encode($chartRows)) ?>'></canvas></div></div></div><div class="col-xl-5"><div class="card panel h-100"><div class="card-header"><h2>Perjalanan Z-score TB/U</h2></div><div class="card-body chart-tall"><canvas id="zscoreChart" data-values='<?= e(json_encode($chartRows)) ?>'></canvas></div></div></div></div>
+    <div class="card panel mt-4"><div class="card-header"><h2>Catatan membaca Z-score TB/U</h2></div><div class="card-body"><div class="z-note-grid"><div><b>&lt; -3 SD</b><span>Sangat Pendek</span></div><div><b>-3 s.d. &lt; -2 SD</b><span>Pendek/Stunting</span></div><div><b>-2 s.d. 3 SD</b><span>Normal</span></div><div><b>&gt; 3 SD</b><span>Tinggi</span></div></div><p class="text-muted mb-0 mt-3">Z-score membandingkan tinggi anak menurut umur dan jenis kelamin dengan standar WHO. Grafik dipakai untuk melihat arah perkembangan dari waktu ke waktu; hasil yang memerlukan perhatian sebaiknya dikonsultasikan kepada tenaga kesehatan.</p></div></div>
+    <div class="card panel mt-4"><div class="card-header"><h2>Riwayat <?= e($child['name']) ?></h2></div><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Tanggal</th><th>Usia</th><th>Sumber</th><th>Berat</th><th>Tinggi</th><th>Z-score</th><th>Kategori</th></tr></thead><tbody><?php foreach(array_reverse($history) as $r): ?><tr><td><?= e(date('d/m/Y H:i',strtotime($r['measured_at']))) ?></td><td><?= e(number_format((int)$r['age_days']/30.4375,1)) ?> bln</td><td><?= e(strtoupper($r['source'])) ?></td><td><?= e(number_format((float)$r['weight_kg'],2)) ?> kg</td><td><?= e(number_format((float)$r['height_cm'],2)) ?> cm</td><td><?= e(number_format((float)$r['z_score'],2)) ?> SD</td><td><span class="status status-<?= str_contains($r['category'],'Pendek')?'danger':'success' ?>"><?= e($r['category']) ?></span></td></tr><?php endforeach; ?><?php if(!$history): ?><tr><td colspan="7" class="empty">Belum ada riwayat pemeriksaan untuk balita ini.</td></tr><?php endif; ?></tbody></table></div></div>
+    <?php }, 'balita'); exit;
+}
+
 if ($path === 'balita') {
     $edit=null; if(isset($_GET['edit'])) { $s=$pdo->prepare('SELECT * FROM children WHERE id=?');$s->execute([(int)$_GET['edit']]);$edit=$s->fetch(); }
     $q=trim((string)($_GET['q']??''));$s=$pdo->prepare("SELECT c.*, (SELECT MAX(measured_at) FROM measurements m WHERE m.child_id=c.id AND m.status='approved' AND m.voided_at IS NULL) last_measurement, (SELECT COUNT(*) FROM measurements m2 WHERE m2.child_id=c.id) measurement_count FROM children c WHERE c.name LIKE ? OR c.rfid_uid LIKE ? ORDER BY c.name");$s->execute(["%$q%","%$q%"]);$children=$s->fetchAll();
     $unknown=$pdo->query('SELECT s.*,d.name device_name FROM unknown_rfid_scans s JOIN devices d ON d.id=s.device_id WHERE s.resolved_at IS NULL ORDER BY s.last_scanned_at DESC LIMIT 10')->fetchAll();
     render('Data Balita', function() use($children,$unknown,$edit,$q,$user){ ?>
     <div class="page-actions"><div><h2>Daftar balita</h2><p>Kelola identitas balita dan kartu RFID yang digunakan alat.</p></div><button class="btn btn-primary" type="button" data-bs-toggle="modal" data-bs-target="#childModal">+ Tambah Balita</button></div>
-    <div class="card panel"><div class="card-header flex-wrap"><h2><?= e(count($children)) ?> data balita</h2><form class="d-flex"><input class="form-control" name="q" value="<?= e($q) ?>" placeholder="Cari nama atau RFID"><button class="btn btn-outline-primary ms-2">Cari</button></form></div><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Balita</th><th>RFID</th><th>L/P</th><th>Lahir</th><th>Status</th><th></th></tr></thead><tbody><?php foreach($children as $c): ?><tr><td><b><?= e($c['name']) ?></b></td><td><code><?= e($c['rfid_uid']) ?></code></td><td><?= e($c['sex']) ?></td><td><?= e(date('d/m/Y',strtotime($c['birth_date']))) ?></td><td><span class="status status-<?= $c['is_active']?'success':'secondary' ?>"><?= $c['is_active']?'Aktif':'Nonaktif' ?></span></td><td class="text-nowrap"><a class="btn btn-sm btn-light" href="<?= e(url('balita').'?edit='.$c['id']) ?>">Edit</a><?php if($user['role']==='admin'): ?> <button class="btn btn-sm btn-outline-danger" type="button" data-bs-toggle="modal" data-bs-target="#deleteChildModal" data-id="<?= e($c['id']) ?>" data-name="<?= e($c['name']) ?>" data-count="<?= e($c['measurement_count']) ?>">Hapus</button><?php endif; ?></td></tr><?php endforeach; ?><?php if(!$children): ?><tr><td colspan="6" class="empty">Data tidak ditemukan.</td></tr><?php endif; ?></tbody></table></div></div>
+    <div class="card panel"><div class="card-header flex-wrap"><h2><?= e(count($children)) ?> data balita</h2><form class="d-flex"><input class="form-control" name="q" value="<?= e($q) ?>" placeholder="Cari nama atau RFID"><button class="btn btn-outline-primary ms-2">Cari</button></form></div><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Balita</th><th>RFID</th><th>L/P</th><th>Lahir</th><th>Pemeriksaan terakhir</th><th>Status</th><th></th></tr></thead><tbody><?php foreach($children as $c): ?><tr><td><b><?= e($c['name']) ?></b></td><td><code><?= e($c['rfid_uid']) ?></code></td><td><?= e($c['sex']) ?></td><td><?= e(date('d/m/Y',strtotime($c['birth_date']))) ?></td><td><?= $c['last_measurement']?e(date('d/m/Y',strtotime($c['last_measurement']))):'—' ?></td><td><span class="status status-<?= $c['is_active']?'success':'secondary' ?>"><?= $c['is_active']?'Aktif':'Nonaktif' ?></span></td><td class="text-nowrap"><a class="btn btn-sm btn-outline-primary" href="<?= e(url('balita/perkembangan').'?id='.$c['id']) ?>">Perkembangan</a> <a class="btn btn-sm btn-light" href="<?= e(url('balita').'?edit='.$c['id']) ?>">Edit</a><?php if($user['role']==='admin'): ?> <button class="btn btn-sm btn-outline-danger" type="button" data-bs-toggle="modal" data-bs-target="#deleteChildModal" data-id="<?= e($c['id']) ?>" data-name="<?= e($c['name']) ?>" data-count="<?= e($c['measurement_count']) ?>">Hapus</button><?php endif; ?></td></tr><?php endforeach; ?><?php if(!$children): ?><tr><td colspan="7" class="empty">Data tidak ditemukan.</td></tr><?php endif; ?></tbody></table></div></div>
     <div class="card panel mt-4"><div class="card-header"><div><h2>RFID belum terdaftar</h2><small class="text-muted">Kartu yang ditempel saat mode normal akan muncul di sini.</small></div></div><div class="table-responsive"><table class="table"><thead><tr><th>UID</th><th>Alat</th><th>Terakhir</th><th></th></tr></thead><tbody><?php foreach($unknown as $s): ?><tr><td><code><?= e($s['rfid_uid']) ?></code></td><td><?= e($s['device_name']) ?></td><td><?= e(date('d/m/Y H:i',strtotime($s['last_scanned_at']))) ?></td><td class="text-nowrap"><a href="<?= e(url('balita').'?uid='.urlencode($s['rfid_uid'])) ?>" class="btn btn-sm btn-primary">Daftarkan</a> <form class="d-inline" method="post" action="<?= e(url('balita/antrean-hapus')) ?>" onsubmit="return confirm('Hapus kartu ini dari daftar tunggu?')"><?= csrf_field() ?><input type="hidden" name="id" value="<?= e($s['id']) ?>"><button class="btn btn-sm btn-outline-danger">Hapus</button></form></td></tr><?php endforeach; ?><?php if(!$unknown): ?><tr><td colspan="4" class="empty">Belum ada kartu dalam antrean.</td></tr><?php endif; ?></tbody></table></div></div>
     <div class="modal fade" id="childModal" tabindex="-1" data-auto-show="<?= ($edit||isset($_GET['uid']))?'1':'0' ?>"><div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable"><form class="modal-content" method="post" action="<?= e(url('balita/simpan')) ?>"><div class="modal-header"><div><h5 class="modal-title"><?= $edit?'Edit':'Tambah' ?> Balita</h5><small class="text-muted">Hubungkan satu kartu RFID dengan data balita.</small></div><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><?= csrf_field() ?><input type="hidden" name="id" value="<?= e($edit['id']??'') ?>"><div class="modal-form-note">Klik <b>Tempel RFID</b>, lalu tempelkan kartu pada alat. UID juga dapat diisi manual.</div><label class="form-label">UID RFID</label><div class="input-group mb-3"><input class="form-control" id="balitaRfid" name="rfid_uid" value="<?= e($edit['rfid_uid']??($_GET['uid']??'')) ?>" required><button class="btn btn-outline-primary text-nowrap" type="button" data-rfid-trigger="balita" data-rfid-target="#balitaRfid">Tempel RFID</button></div><label class="form-label">Nama balita</label><input class="form-control mb-3" name="name" value="<?= e($edit['name']??'') ?>" required><div class="row"><div class="col-md-6"><label class="form-label">Tanggal lahir</label><input class="form-control mb-3" type="date" name="birth_date" value="<?= e($edit['birth_date']??'') ?>" required></div><div class="col-md-6"><label class="form-label">Jenis kelamin</label><select class="form-select mb-3" name="sex"><option value="L" <?= ($edit['sex']??'')==='L'?'selected':'' ?>>Laki-laki</option><option value="P" <?= ($edit['sex']??'')==='P'?'selected':'' ?>>Perempuan</option></select></div></div><label class="form-check"><input class="form-check-input" type="checkbox" name="is_active" <?= !isset($edit)||$edit['is_active']?'checked':'' ?>> <span class="form-check-label">Data aktif</span></label></div><div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Batal</button><button class="btn btn-primary">Simpan Balita</button></div></form></div></div>
-    <?php if($user['role']==='admin'): ?><div class="modal fade" id="deleteChildModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><form class="modal-content" method="post" action="<?= e(url('balita/hapus')) ?>"><?= csrf_field() ?><input type="hidden" name="id"><div class="modal-header"><h5 class="modal-title">Hapus data balita</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><p class="mb-2">Hapus data <b data-delete-name></b>? Tindakan ini tidak dapat dibatalkan.</p><div class="alert alert-warning mb-0 d-none" data-delete-history><b data-delete-count></b> riwayat pemeriksaan balita ini akan ikut terhapus permanen dari laporan dan grafik.<label class="form-check mt-2 mb-0"><input class="form-check-input" type="checkbox" name="confirm_history" value="1"> <span class="form-check-label">Saya mengerti, hapus beserta riwayatnya</span></label></div></div><div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Batal</button><button class="btn btn-danger">Ya, hapus</button></div></form></div></div><?php endif; ?>
+    <?php if($user['role']==='admin'): ?><div class="modal fade" id="deleteChildModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><form class="modal-content" method="post" action="<?= e(url('balita/hapus')) ?>"><?= csrf_field() ?><input type="hidden" name="id"><div class="modal-header"><h5 class="modal-title">Hapus atau arsipkan balita</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><p class="mb-2">Proses data <b data-delete-name></b>?</p><div class="alert alert-warning mb-0 d-none" data-delete-history>Balita ini memiliki <b data-delete-count></b> riwayat pemeriksaan. Data akan <b>dinonaktifkan</b>, sedangkan seluruh riwayat dan grafik tetap tersimpan.</div><div class="alert alert-danger mb-0" data-delete-empty>Balita belum memiliki riwayat sehingga datanya akan dihapus permanen.</div></div><div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Batal</button><button class="btn btn-danger" data-delete-submit>Proses</button></div></form></div></div><?php endif; ?>
     <?= rfid_scan_modal() ?><?php },'balita');exit;
 }
 

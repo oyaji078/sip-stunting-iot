@@ -7,10 +7,11 @@ document.querySelector('#deleteChildModal')?.addEventListener('show.bs.modal',e=
   const m=e.target,d=e.relatedTarget.dataset,n=parseInt(d.count||'0',10);
   m.querySelector('[name=id]').value=d.id;
   m.querySelector('[data-delete-name]').textContent=d.name;
-  const box=m.querySelector('[data-delete-history]'),cb=m.querySelector('[name=confirm_history]');
+  const box=m.querySelector('[data-delete-history]');
   box.classList.toggle('d-none',n<1);
+  m.querySelector('[data-delete-empty]').classList.toggle('d-none',n>0);
   m.querySelector('[data-delete-count]').textContent=n;
-  cb.checked=false;cb.required=n>0;
+  m.querySelector('[data-delete-submit]').textContent=n>0?'Nonaktifkan':'Ya, hapus';
 });
 document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
 document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.getOrCreateInstance(el).show());
@@ -50,6 +51,49 @@ document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.ge
   }
   refreshDevices();
   setInterval(refreshDevices,5000);
+})();
+
+// Grafik perkembangan dipisahkan per balita.
+(function(){
+  if(!window.Chart)return;
+  const growth=document.querySelector('#growthChart');
+  if(growth){
+    const rows=JSON.parse(growth.dataset.values||'[]');
+    new Chart(growth,{type:'line',data:{labels:rows.map(x=>x.date),datasets:[
+      {label:'Berat (kg)',data:rows.map(x=>x.weight),borderColor:'#176b5b',backgroundColor:'#176b5b22',yAxisID:'weight',tension:.28,pointRadius:4},
+      {label:'Tinggi (cm)',data:rows.map(x=>x.height),borderColor:'#4a8eb0',backgroundColor:'#4a8eb022',yAxisID:'height',tension:.28,pointRadius:4}
+    ]},options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},scales:{weight:{position:'left',title:{display:true,text:'kg'}},height:{position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'cm'}}}}});
+  }
+  const zchart=document.querySelector('#zscoreChart');
+  if(zchart){
+    const rows=JSON.parse(zchart.dataset.values||'[]'),line=value=>rows.map(()=>value);
+    new Chart(zchart,{type:'line',data:{labels:rows.map(x=>x.date),datasets:[
+      {label:'Z-score',data:rows.map(x=>x.z),borderColor:'#e36d48',backgroundColor:'#e36d4820',fill:true,tension:.28,pointRadius:4},
+      {label:'Batas -2 SD',data:line(-2),borderColor:'#e79030',borderDash:[6,5],pointRadius:0,borderWidth:1.5},
+      {label:'Batas -3 SD',data:line(-3),borderColor:'#a23f45',borderDash:[6,5],pointRadius:0,borderWidth:1.5}
+    ]},options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},scales:{y:{suggestedMin:-4,suggestedMax:4,title:{display:true,text:'Standar deviasi (SD)'}}}}});
+  }
+})();
+
+// Sinkronisasi data antartab/perangkat. Reload ditunda saat operator sedang
+// mengetik atau modal terbuka agar input tidak hilang.
+(function(){
+  const url=document.body.dataset.liveUrl;
+  if(!url)return;
+  let version=null,pending=false;
+  const busy=()=>document.querySelector('.modal.show')||['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName);
+  async function poll(){
+    try{
+      const response=await fetch(url,{headers:{Accept:'application/json'},cache:'no-store'});
+      if(!response.ok)return;
+      const next=(await response.json()).version;
+      if(version===null)version=next;
+      else if(next&&next!==version){version=next;pending=true;}
+      if(pending&&!busy())location.reload();
+    }catch(error){/* coba lagi pada interval berikutnya */}
+  }
+  poll();
+  setInterval(poll,3000);
 })();
 
 // Tempel RFID: minta tempel kartu di alat, lalu isi form dari scan terbaru.
