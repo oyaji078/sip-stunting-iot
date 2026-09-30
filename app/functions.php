@@ -208,7 +208,7 @@ function render(string $title, callable $content, string $active = ''): void
     <title><?= e($title) ?> · <?= e($brand['name']) ?> <?= e($brand['place']) ?></title>
     <link rel="stylesheet" href="<?= e(url('assets/vendor/bootstrap.min.css')) ?>">
     <link rel="stylesheet" href="<?= e(asset_url('assets/app.css')) ?>">
-</head><body>
+</head><body<?= $user && $active !== 'alat' ? ' data-live-url="' . e(url('live/version')) . '"' : '' ?>>
 <?php if ($user): ?>
 <div class="app-shell">
 <aside class="sidebar">
