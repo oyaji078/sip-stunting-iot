@@ -53,6 +53,29 @@ $assert(GrowthService::category(-2.0) === 'Normal', 'batas -2');
 $assert(GrowthService::category(3.0) === 'Normal', 'batas +3');
 $assert(GrowthService::category(3.0001) === 'Tinggi', 'batas tinggi');
 
+// WHO Anthro: alat mengukur berdiri. Pada usia < 731 hari, tinggi berdiri
+// distandarkan menjadi panjang dengan tambahan 0,7 cm sebelum LMS dihitung.
+$stmt = $pdo->prepare("SELECT m FROM who_lms WHERE sex=1 AND age_days=730 AND measurement_type='L'");
+$stmt->execute();
+$lengthMedian730 = (float)$stmt->fetchColumn();
+$boundary730 = $growth->calculate('L', '2024-03-01', '2026-03-01', $lengthMedian730 - 0.7);
+$assert(abs($boundary730['z_score']) < 0.0001, 'tinggi berdiri usia 730 hari dikoreksi +0,7 cm');
+$stmt = $pdo->prepare("SELECT m FROM who_lms WHERE sex=1 AND age_days=731 AND measurement_type='H'");
+$stmt->execute();
+$heightMedian731 = (float)$stmt->fetchColumn();
+$boundary731 = $growth->calculate('L', '2023-03-01', '2025-03-01', $heightMedian731);
+$assert(abs($boundary731['z_score']) < 0.0001, 'usia 731 hari memakai referensi tinggi berdiri');
+$assert($boundary731['reference_version'] === 'WHO-CGS-2006-anthro-1.1.0-standing', 'versi referensi WHO tercatat');
+
+// Nilai jangkar dari contoh resmi paket WorldHealthOrganization/anthro:
+// laki-laki 1000 hari/100 cm = 1,70 dan perempuan 1000 hari/80 cm = -3,50.
+$anchorBirth = new DateTimeImmutable('2020-01-01');
+$anchorDate = $anchorBirth->modify('+1000 days')->format('Y-m-d');
+$anchorMale = $growth->calculate('L', $anchorBirth->format('Y-m-d'), $anchorDate, 100.0);
+$anchorFemale = $growth->calculate('P', $anchorBirth->format('Y-m-d'), $anchorDate, 80.0);
+$assert(round($anchorMale['z_score'], 2) === 1.70, 'jangkar resmi WHO laki-laki 1000 hari');
+$assert(round($anchorFemale['z_score'], 2) === -3.50, 'jangkar resmi WHO perempuan 1000 hari');
+
 // Redirect: path kosong harus ke beranda, bukan header Location kosong
 // (bug yang membuat login berhasil tetapi tetap berada di halaman masuk).
 $config = ['app' => ['url' => 'https://posyandu.oypoint.online']];

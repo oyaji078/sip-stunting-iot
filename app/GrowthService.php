@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 final class GrowthService
 {
-    public const REFERENCE_VERSION = 'WHO-CGS-2006-lenanthro-daily';
+    public const REFERENCE_VERSION = 'WHO-CGS-2006-anthro-1.1.0-standing';
 
     public function __construct(private PDO $pdo)
     {
@@ -38,8 +38,15 @@ final class GrowthService
 
         $ageDays = self::ageInDays($birthDate, $measuredDate);
         $sexCode = strtoupper($sex) === 'L' ? 1 : 2;
-        $stmt = $this->pdo->prepare('SELECT l, m, s FROM who_lms WHERE sex = ? AND age_days = ? LIMIT 1');
-        $stmt->execute([$sexCode, $ageDays]);
+
+        // Alat selalu mengukur tinggi berdiri. WHO Anthro memakai referensi
+        // panjang terlentang sebelum 731 hari, sehingga tinggi berdiri pada
+        // kasus batas tersebut harus ditambah 0,7 cm terlebih dahulu.
+        $measurementType = $ageDays < 731 ? 'L' : 'H';
+        $standardizedHeightCm = $ageDays < 731 ? $heightCm + 0.7 : $heightCm;
+
+        $stmt = $this->pdo->prepare('SELECT l, m, s FROM who_lms WHERE sex = ? AND age_days = ? AND measurement_type = ? LIMIT 1');
+        $stmt->execute([$sexCode, $ageDays, $measurementType]);
         $row = $stmt->fetch();
         if (!$row) {
             throw new RuntimeException("Referensi WHO tidak ditemukan untuk umur {$ageDays} hari.");
@@ -49,8 +56,8 @@ final class GrowthService
         $m = (float)$row['m'];
         $s = (float)$row['s'];
         $z = abs($l) < 1e-12
-            ? log($heightCm / $m) / $s
-            : (pow($heightCm / $m, $l) - 1) / ($l * $s);
+            ? log($standardizedHeightCm / $m) / $s
+            : (pow($standardizedHeightCm / $m, $l) - 1) / ($l * $s);
 
         return [
             'age_days' => $ageDays,
