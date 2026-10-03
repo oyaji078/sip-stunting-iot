@@ -166,7 +166,7 @@ String rejectReason;
 enum LookupResult { LOOKUP_REGISTERED, LOOKUP_UNKNOWN, LOOKUP_INELIGIBLE, LOOKUP_CAPTURED, LOOKUP_CAPTURED_REGISTERED, LOOKUP_ERROR };
 enum SubmitResult { SUBMIT_OK, SUBMIT_RETRY, SUBMIT_REJECTED };
 
-struct Note { uint16_t hz; uint16_t ms; }; // nada buzzer; hz 0 = jeda
+struct Note { bool on; uint16_t ms; }; // pola buzzer: bunyi/diam selama ms
 
 // =============================================================
 // LCD 20x4 (PCF8574, 4-bit)
@@ -241,25 +241,28 @@ bool isLCDReady()
 // =============================================================
 // BUZZER
 // =============================================================
-// Buzzer ini terdengar jelas di sekitar 4.8 kHz (bunyi kartu di firmware lama);
-// nada sekitar 2 kHz hampir tidak terdengar. Semua nada memakai 3.8-5 kHz.
-// Ubah angka di tabel ini bila perlu menyetel suara.
+// Buzzer AKTIF: punya osilator sendiri, jadi cukup diberi HIGH agar berbunyi
+// paling keras. Sinyal PWM bernada justru membuatnya pelan. Pola bunyi dibedakan
+// dari panjang bunyi dan jeda (ms) di tabel ini.
 
-const Note TUNE_CARD[]   = {{4800, 100}};
-const Note TUNE_OK[]     = {{4300, 110}, {0, 80}, {5000, 180}};
-const Note TUNE_WARN[]   = {{5000, 120}, {3800, 220}, {0, 100}, {5000, 120}, {3800, 220}};
-const Note TUNE_ERROR[]  = {{3800, 170}, {0, 100}, {4600, 170}, {0, 100}, {3800, 170}, {0, 100}, {4600, 170}};
-const Note TUNE_READY[]  = {{4800, 1000}};                                         // alat siap / siap mengukur: 1 bunyi panjang
-const Note TUNE_DONE[]   = {{4800, 400}, {0, 120}, {4800, 400}, {0, 120}, {4800, 800}}; // pemeriksaan selesai, silakan turun
+#define ON true
+#define OFF false
+
+const Note TUNE_CARD[]   = {{ON, 100}};
+const Note TUNE_OK[]     = {{ON, 110}, {OFF, 80}, {ON, 180}};
+const Note TUNE_WARN[]   = {{ON, 120}, {OFF, 60}, {ON, 220}, {OFF, 100}, {ON, 120}, {OFF, 60}, {ON, 220}};
+const Note TUNE_ERROR[]  = {{ON, 170}, {OFF, 100}, {ON, 170}, {OFF, 100}, {ON, 170}, {OFF, 100}, {ON, 170}};
+const Note TUNE_READY[]  = {{ON, 1000}};                                         // alat siap / siap mengukur: 1 bunyi panjang
+const Note TUNE_DONE[]   = {{ON, 400}, {OFF, 120}, {ON, 400}, {OFF, 120}, {ON, 800}}; // pemeriksaan selesai, silakan turun
 
 void play(const Note* tune, size_t count)
 {
   for (size_t i = 0; i < count; i++)
   {
-    ledcWriteTone(BUZZER_PIN, tune[i].hz);
+    digitalWrite(BUZZER_PIN, tune[i].on ? HIGH : LOW);
     delay(tune[i].ms);
   }
-  ledcWriteTone(BUZZER_PIN, 0);
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
 #define PLAY(tune) play(tune, sizeof(tune) / sizeof(tune[0]))
@@ -952,9 +955,9 @@ void setup()
   lcdShow("SISTEM IoT", "DETEKSI STUNTING", "Inisialisasi...", "Mohon tunggu");
 
   // Buzzer; arus pin maksimum agar lebih keras
-  ledcAttach(BUZZER_PIN, 4800, 8);
+  pinMode(BUZZER_PIN, OUTPUT);
   gpio_set_drive_capability((gpio_num_t)BUZZER_PIN, GPIO_DRIVE_CAP_3);
-  ledcWriteTone(BUZZER_PIN, 0);
+  digitalWrite(BUZZER_PIN, LOW);
 
   // Timbangan
   scale.begin(HX711_DT, HX711_SCK);
