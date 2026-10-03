@@ -249,9 +249,7 @@ const Note TUNE_CARD[]   = {{2000, 100}};
 const Note TUNE_OK[]     = {{1800, 110}, {0, 80}, {2400, 180}};
 const Note TUNE_WARN[]   = {{2300, 120}, {1700, 220}, {0, 100}, {2300, 120}, {1700, 220}};
 const Note TUNE_ERROR[]  = {{1700, 170}, {0, 100}, {2300, 170}, {0, 100}, {1700, 170}, {0, 100}, {2300, 170}};
-const Note TUNE_WEIGHT[] = {{1800, 130}, {0, 75}, {2600, 190}};
-const Note TUNE_HEIGHT[] = {{1800, 90}, {0, 65}, {2200, 110}, {0, 65}, {2600, 230}};
-const Note TUNE_READY[]  = {{1800, 250}, {0, 90}, {2200, 250}, {0, 90}, {2600, 600}};   // alat siap dipakai
+const Note TUNE_READY[]  = {{2000, 1000}};                                         // alat siap / siap mengukur: 1 bunyi panjang
 const Note TUNE_DONE[]   = {{2000, 400}, {0, 120}, {2000, 400}, {0, 120}, {2000, 800}}; // semua hasil tampil
 
 void play(const Note* tune, size_t count)
@@ -460,7 +458,7 @@ SubmitResult submitMeasurement(const String& uid, float weight, float height, co
 
 void sendHeartbeat()
 {
-  scaleReady = scale.is_ready();
+  scaleReady = scale.wait_ready_timeout(200);
   lcdReady = isLCDReady();
 
   JsonDocument request;
@@ -857,11 +855,10 @@ void examine(const String& uid)
 
   // 3. Data balita tampil lebih dulu: nama, jenis kelamin, umur. Baru menimbang.
   if (found == LOOKUP_REGISTERED)
-  {
     lcdShow("DATA DITEMUKAN", childName, sexText() + " | " + String(childAgeMonth) + " bulan", "Menyiapkan timbangan");
-    PLAY(TUNE_OK);
-    delay(2000);
-  }
+  PLAY(TUNE_READY); // alat siap mengukur: 1 bunyi panjang
+  if (found == LOOKUP_REGISTERED)
+    delay(1000);
 
   // Layar timbang hanya berisi perintah (tanpa nama/umur).
   lcdShow("SILAKAN NAIK", "Berat: --.-- kg", "Tunggu stabil...", "Jangan bergerak");
@@ -874,7 +871,6 @@ void examine(const String& uid)
     delay(2500);
     return;
   }
-  PLAY(TUNE_WEIGHT);
 
   // 4. Tinggi.
   lcdShow("PENGUKURAN TINGGI", "Tinggi: --.-- cm", "Tunggu stabil...", "Berdiri tegak, diam");
@@ -889,7 +885,6 @@ void examine(const String& uid)
     return;
   }
   Serial.printf("TINGGI TERKUNCI: %.2f cm | BERAT: %.2f kg\n", height, weight);
-  PLAY(TUNE_HEIGHT);
 
   // 5. Kirim ke web.
   lcdShow("TINGGI TERKUNCI", "Tinggi: " + String(height, 2) + " cm", "Menghitung TB/U", "Mohon tunggu...");
@@ -967,8 +962,8 @@ void setup()
   lcdShow("INISIALISASI", "Tare timbangan...");
   delay(1000);
   scale.tare(20);
-  scaleReady = scale.is_ready();
-  Serial.println("HX711 siap");
+  scaleReady = scale.wait_ready_timeout(1000);
+  Serial.println(scaleReady ? "HX711 siap" : "HX711 tidak merespons");
 
   // Sensor tinggi (wajib ada)
   Wire.begin(TOF_SDA, TOF_SCL);
