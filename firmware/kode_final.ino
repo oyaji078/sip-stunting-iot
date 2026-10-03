@@ -81,6 +81,9 @@ const unsigned long HEIGHT_STABLE_TIME = 2000;
 const unsigned long HEIGHT_TIMEOUT = 60000;
 const int HEIGHT_SAMPLES = 7; // median 7 pembacaan terakhir
 
+// Hasil tetap tampil minimal selama ini, walau anak sudah turun dari timbangan
+const unsigned long RESULT_HOLD_MS = 15000;
+
 // Jaringan
 const unsigned long HEARTBEAT_INTERVAL = 15000;
 const unsigned long MODE_POLL_INTERVAL = 2000;
@@ -678,7 +681,7 @@ float waitStableWeight()
     }
 
     lcdLine(1, "Berat: " + String(weight, 2) + " kg");
-    lcdLine(2, "Menunggu stabil...");
+    lcdLine(2, weight < MIN_WEIGHT ? "Naik ke timbangan" : "Menunggu stabil...");
 
     if (weight < MIN_WEIGHT) // belum ada yang naik
     {
@@ -858,7 +861,7 @@ void examine(const String& uid)
   if (captureMode != CAPTURE_OFF)
     lcdShow("KARTU TERBACA", uid, "Mengirim ke web...");
   else
-    lcdShow("SILAKAN NAIK", "Berat: --.-- kg", "Cek kartu ke web...", "Jangan bergerak");
+    lcdShow("KARTU TERBACA", uid, "Mengambil data", "balita...");
 
   // 2. Cek kartu ke web.
   LookupResult found = lookupCard(uid);
@@ -889,7 +892,7 @@ void examine(const String& uid)
   }
   if (found == LOOKUP_INELIGIBLE)
   {
-    lcdShow("TIDAK DAPAT DIUKUR", "Usia harus 24-60", "bulan / data nonaktif");
+    lcdShow("TIDAK DAPAT DIUKUR", "Usia harus 24-60", "bulan/data nonaktif");
     PLAY(TUNE_ERROR);
     delay(3000);
     return;
@@ -907,14 +910,14 @@ void examine(const String& uid)
   // 3. Data balita tampil lebih dulu: nama, jenis kelamin, umur. Baru menimbang.
   if (found == LOOKUP_REGISTERED)
   {
-    lcdShow("DATA DITEMUKAN", childName, sexText() + " | " + String(childAgeMonth) + " bulan", "Silakan naik timbangan");
+    lcdShow("DATA DITEMUKAN", childName, sexText() + " | " + String(childAgeMonth) + " bulan", "Menyiapkan timbangan");
     PLAY(TUNE_OK);
     delay(2000);
-    lcdShow(childName, "Berat: --.-- kg", "Menunggu stabil...", sexText() + " | " + String(childAgeMonth) + " bulan");
+    lcdShow(childName, "Berat: --.-- kg", "Naik ke timbangan", sexText() + " | " + String(childAgeMonth) + " bulan");
   }
   else
   {
-    lcdShow("SILAKAN NAIK", "Berat: --.-- kg", "Menunggu stabil...", "Jangan bergerak");
+    lcdShow("SILAKAN NAIK", "Berat: --.-- kg", "Naik ke timbangan", "Jangan bergerak");
   }
 
   float weight = waitStableWeight();
@@ -952,9 +955,10 @@ void examine(const String& uid)
   {
     showResults(weight, height); // semua hasil tampil + bunyi selesai
 
-    // Tahan hasil minimal 8 detik, lalu tunggu anak turun dari timbangan.
+    // Hasil tetap tampil minimal RESULT_HOLD_MS, walau beban sudah diangkat.
+    // Setelah itu, bila masih ada beban, tunggu sampai diangkat (maks. 60 detik).
     unsigned long shownAt = millis();
-    while (millis() - shownAt < 8000) delay(100);
+    while (millis() - shownAt < RESULT_HOLD_MS) delay(100);
     while (millis() - shownAt < 60000)
     {
       float now = readWeight();
