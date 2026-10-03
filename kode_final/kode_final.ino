@@ -82,11 +82,11 @@ const unsigned long HEIGHT_TIMEOUT = 60000;
 const int HEIGHT_SAMPLES = 7; // median 7 pembacaan terakhir
 
 // Hasil tetap tampil minimal selama ini, walau anak sudah turun dari timbangan
-const unsigned long RESULT_HOLD_MS = 15000;
+const unsigned long RESULT_HOLD_MS = 10000;
 
 // Jaringan
-const unsigned long HEARTBEAT_INTERVAL = 15000;
-const unsigned long MODE_POLL_INTERVAL = 2000;
+// Heartbeat jarang saja: tiap permintaan web menahan pembacaan kartu sejenak.
+const unsigned long HEARTBEAT_INTERVAL = 30000;
 
 // ISRG Root X1 (Let's Encrypt), berlaku sampai 2035.
 const char* ROOT_CA = R"EOF(
@@ -139,13 +139,7 @@ bool rfidReady = false, scaleReady = false, tofReady = false, lcdReady = false;
 bool secureClientReady = false;
 int authFailures = 0;
 
-// Mode tangkap kartu dari website (tombol "Tempel RFID" / "Via RFID").
-enum CaptureMode { CAPTURE_OFF, CAPTURE_REGISTER, CAPTURE_SELECT };
-CaptureMode captureMode = CAPTURE_OFF;
-unsigned long modePollInterval = MODE_POLL_INTERVAL;
-
 unsigned long lastHeartbeatAt = 0;
-unsigned long lastModePollAt = 0;
 unsigned long lastRfidCheckAt = 0;
 unsigned long lastReconnectAt = 0;
 
@@ -484,49 +478,17 @@ void sendHeartbeat()
 }
 
 // =============================================================
-// LAYAR STANDBY DAN MODE TANGKAP
+// STANDBY
 // =============================================================
 
 void showStandby()
 {
-  if (captureMode == CAPTURE_REGISTER)
-    lcdShow("MODE PENDAFTARAN", "Tempelkan kartu", "balita yang akan", "didaftarkan di web");
-  else if (captureMode == CAPTURE_SELECT)
-    lcdShow("PILIH BALITA", "Tempelkan kartu", "untuk pemeriksaan", "(permintaan web)");
-  else
-    lcdShow("SISTEM IoT", "DETEKSI STUNTING", "Tempelkan RFID");
+  lcdShow("SISTEM IoT", "DETEKSI STUNTING", "Tempelkan RFID");
 }
 
-// Tanya web apakah sedang meminta kartu (hanya untuk pesan di LCD; kartu yang
-// ditempel tetap dicek ke web apa pun hasilnya).
-void pollCaptureMode()
-{
-  lastModePollAt = millis();
-
-  JsonDocument request;
-  JsonDocument response;
-  request["ping"] = 1; // body harus objek JSON
-  if (apiPost("mode", request, response) != 200)
-  {
-    modePollInterval = 10000; // koneksi bermasalah: jarangkan
-    return;
-  }
-  modePollInterval = MODE_POLL_INTERVAL;
-
-  String mode = response["mode"] | "off";
-  CaptureMode newMode = CAPTURE_OFF;
-  if (mode == "register") newMode = CAPTURE_REGISTER;
-  else if (mode == "select") newMode = CAPTURE_SELECT;
-
-  if (newMode != captureMode)
-  {
-    captureMode = newMode;
-    showStandby();
-  }
-}
-
-// Pekerjaan jaringan saat standby. Dipanggil bila tidak ada kartu; satu
-// permintaan memakan sekitar 0.1-0.3 detik.
+// Pekerjaan jaringan saat standby: hanya heartbeat tiap 30 detik. Mode tangkap
+// kartu dari website ("Tempel RFID") tidak perlu ditanyakan terus-menerus:
+// web sudah menjawab "captured" saat kartu dicek, jadi alat tetap cepat.
 void idleNetwork()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -548,11 +510,7 @@ void idleNetwork()
       connectWiFi(true);
       showStandby();
     }
-    return;
   }
-
-  if (millis() - lastModePollAt >= modePollInterval)
-    pollCaptureMode();
 }
 
 // =============================================================
@@ -858,18 +816,16 @@ void examine(const String& uid)
 {
   // 1. Respons lokal PERTAMA: bunyi dan layar, sebelum menghubungi web.
   PLAY(TUNE_CARD);
-  if (captureMode != CAPTURE_OFF)
-    lcdShow("KARTU TERBACA", uid, "Mengirim ke web...");
-  else
-    lcdShow("KARTU TERBACA", uid, "Mengambil data", "balita...");
+  lcdShow("KARTU TERBACA", uid, "Mengambil data", "balita...");
 
   // 2. Cek kartu ke web.
+  unsigned long lookupStarted = millis();
   LookupResult found = lookupCard(uid);
+  Serial.printf("Kartu %s: cek web %lu ms, hasil %d\n", uid.c_str(), millis() - lookupStarted, (int)found);
 
   if (found == LOOKUP_CAPTURED)
   {
     // Website meminta kartu (daftar/pilih balita): UID sudah terkirim, tidak menimbang.
-    captureMode = CAPTURE_OFF;
     lcdShow("KARTU TERBACA", uid, "Dikirim ke website", "Lanjutkan di web");
     PLAY(TUNE_OK);
     delay(1200);
@@ -877,7 +833,6 @@ void examine(const String& uid)
   }
   if (found == LOOKUP_CAPTURED_REGISTERED)
   {
-    captureMode = CAPTURE_OFF;
     lcdShow("KARTU SUDAH", "TERDAFTAR", uid, "Pilih kartu lain");
     PLAY(TUNE_WARN);
     delay(3000);
@@ -893,13 +848,6 @@ void examine(const String& uid)
   if (found == LOOKUP_INELIGIBLE)
   {
     lcdShow("TIDAK DAPAT DIUKUR", "Usia harus 24-60", "bulan/data nonaktif");
-    PLAY(TUNE_ERROR);
-    delay(3000);
-    return;
-  }
-  if (found == LOOKUP_ERROR && captureMode != CAPTURE_OFF)
-  {
-    lcdShow("GANGGUAN API", "Kartu tidak terkirim", "Coba kembali");
     PLAY(TUNE_ERROR);
     delay(3000);
     return;
@@ -953,11 +901,12 @@ void examine(const String& uid)
   {
     showResults(weight, height); // semua hasil tampil + bunyi selesai
 
-    // Hasil tetap tampil minimal RESULT_HOLD_MS, walau beban sudah diangkat.
-    // Setelah itu, bila masih ada beban, tunggu sampai diangkat (maks. 60 detik).
-    unsigned long shownAt = millis();
-    while (millis() - shownAt < RESULT_HOLD_MS) delay(100);
-    while (millis() - shownAt < 60000)
+    // Hasil tampil RESULT_HOLD_MS, lalu minta turun. Kembali ke standby setelah
+    // timbangan kosong (maks. 60 detik).
+    delay(RESULT_HOLD_MS);
+    lcdShow("PEMERIKSAAN SELESAI", "", "Silakan turun", "dari timbangan");
+    unsigned long askedAt = millis();
+    while (millis() - askedAt < 60000)
     {
       float now = readWeight();
       if (now >= 0 && now < MIN_WEIGHT) break;
