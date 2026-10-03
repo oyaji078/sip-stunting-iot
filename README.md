@@ -7,7 +7,7 @@ Sistem informasi Posyandu berbasis PHP 8/MySQL yang terhubung dengan ESP32, RFID
 - Login admin dan petugas dengan pembatasan percobaan masuk.
 - Data balita dan antrean UID RFID yang belum terdaftar.
 - Pemeriksaan IoT dan manual dengan Z-score TB/U WHO harian.
-- Riwayat immutable, pembatalan dengan alasan, grafik, laporan cetak/PDF, dan CSV.
+- Hapus balita dan hapus/tolak pemeriksaan bersifat permanen (nilainya tetap tercatat di audit log), grafik, laporan cetak/PDF, dan CSV.
 - Registrasi perangkat bertoken, heartbeat, RSSI, serta status online/offline.
 - API JSON HTTPS idempoten untuk ESP32.
 - Portal konfigurasi Wi-Fi dan penyimpanan satu pemeriksaan tertunda di NVS.
