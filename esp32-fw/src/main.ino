@@ -681,7 +681,7 @@ float waitStableWeight()
     }
 
     lcdLine(1, "Berat: " + String(weight, 2) + " kg");
-    lcdLine(2, weight < MIN_WEIGHT ? "Naik ke timbangan" : "Menunggu stabil...");
+    lcdLine(2, "Tunggu stabil...");
 
     if (weight < MIN_WEIGHT) // belum ada yang naik
     {
@@ -758,7 +758,7 @@ float waitStableHeight()
     float height = count < 3 ? raw : medianOf(samples, count);
 
     lcdLine(1, "Tinggi: " + String(height, 2) + " cm");
-    lcdLine(2, "Menunggu stabil...");
+    lcdLine(2, "Tunggu stabil...");
 
     if (previous == 0)
     {
@@ -913,12 +913,10 @@ void examine(const String& uid)
     lcdShow("DATA DITEMUKAN", childName, sexText() + " | " + String(childAgeMonth) + " bulan", "Menyiapkan timbangan");
     PLAY(TUNE_OK);
     delay(2000);
-    lcdShow(childName, "Berat: --.-- kg", "Naik ke timbangan", sexText() + " | " + String(childAgeMonth) + " bulan");
   }
-  else
-  {
-    lcdShow("SILAKAN NAIK", "Berat: --.-- kg", "Naik ke timbangan", "Jangan bergerak");
-  }
+
+  // Layar timbang hanya berisi perintah (tanpa nama/umur).
+  lcdShow("SILAKAN NAIK", "Berat: --.-- kg", "Tunggu stabil...", "Jangan bergerak");
 
   float weight = waitStableWeight();
   if (weight < 0)
@@ -931,7 +929,7 @@ void examine(const String& uid)
   PLAY(TUNE_WEIGHT);
 
   // 4. Tinggi.
-  lcdShow("PENGUKURAN TINGGI", "Tinggi: --.-- cm", "Berdiri tegak", "Menunggu stabil...");
+  lcdShow("PENGUKURAN TINGGI", "Tinggi: --.-- cm", "Tunggu stabil...", "Berdiri tegak, diam");
   delay(500);
 
   float height = waitStableHeight();
