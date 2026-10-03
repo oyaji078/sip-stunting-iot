@@ -206,6 +206,18 @@ function app_brand(): array
     ];
 }
 
+/**
+ * Tanggal berbahasa Indonesia, mis. "Sabtu, 03 Oktober 2026". date('l'/'F')
+ * selalu menghasilkan nama Inggris, jadi nama hari dan bulan dipetakan manual.
+ */
+function tanggal_indonesia(?int $timestamp = null): string
+{
+    $timestamp ??= time();
+    $hari = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+    $bulan = [1 => 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+    return $hari[(int)date('w', $timestamp)] . ', ' . date('d', $timestamp) . ' ' . $bulan[(int)date('n', $timestamp)] . ' ' . date('Y', $timestamp);
+}
+
 function render(string $title, callable $content, string $active = ''): void
 {
     global $config;
@@ -233,7 +245,7 @@ function render(string $title, callable $content, string $active = ''): void
     <?php endforeach; ?></nav>
     <div class="sidebar-user"><span><?= e($user['name']) ?></span><small><?= e(ucfirst($user['role'])) ?></small><a href="<?= e(url('logout')) ?>">Keluar</a></div>
 </aside>
-<main class="main"><header><button class="menu-toggle" type="button">☰</button><div><h1><?= e($title) ?></h1><p><?= e(date('l, d F Y')) ?></p></div></header>
+<main class="main"><header><button class="menu-toggle" type="button">☰</button><div><h1><?= e($title) ?></h1><p><?= e(tanggal_indonesia()) ?></p></div></header>
 <?php else: ?><main class="auth-main">
 <?php endif; ?>
 <?php foreach ($flashes as $message): ?><div class="alert alert-<?= e($message['type']) ?> alert-dismissible fade show" role="alert"><?= e($message['message']) ?><button type="button" class="btn-close" data-bs-dismiss="alert"></button></div><?php endforeach; ?>
