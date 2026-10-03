@@ -57,11 +57,15 @@ Buka `firmware/kode_final.ino`, pasang library dalam `firmware/LIBRARIES.md`, pi
 
 ### Alur alat (alat merespons lebih dulu)
 
-- Kartu ditempel → buzzer berbunyi dan layar "Silakan Naik" tampil seketika; alat **tidak menunggu web**. Pengecekan kartu ke web berjalan paralel di Core 0, lalu nama dan umur (bulan) muncul di LCD bila sudah tiba.
-- Bila web menjawab kartu tidak dikenal, usia tidak sesuai, atau sedang mode tangkap, pengukuran dibatalkan dan pesan tampil. Bila web lambat/offline, alat tetap mengukur; hasil dikirim setelah berat dan tinggi terkunci (gagal kirim disimpan di NVS dan dikirim ulang, kecuali web menolak datanya).
-- Satu kartu = satu pemeriksaan. Kartu harus dilepas dari pembaca sebelum kartu yang sama terbaca lagi, dan hasil lama dibuang saat alat kembali ke standby, sehingga alat tidak menghitung dua kali tanpa kartu ditempel.
-- Berat dan tinggi tidak dibulatkan: nilai terkunci di LCD sama dengan yang dikirim ke web (2 desimal, sesuai kolom database).
-- Bunyi: satu bunyi nada naik panjang saat alat menyala dan siap dipakai, dan tiga bunyi panjang saat seluruh perhitungan selesai. Frekuensi buzzer diatur lewat `BUZZER_LOUD_HZ` di firmware.
+Firmware berupa satu alur linear sederhana (tanpa task paralel). Satu kartu = satu pemeriksaan:
+
+1. Kartu ditempel → buzzer berbunyi dan layar "Silakan Naik" tampil **seketika**, sebelum alat menghubungi web.
+2. Alat mengecek kartu ke web → nama, jenis kelamin, dan umur (bulan) tampil di LCD. Kartu tidak dikenal, usia tidak sesuai, atau sedang mode tangkap dari website: pesan tampil dan alat tidak menimbang. Bila web tidak terjangkau, alat tetap mengukur dan web memvalidasi saat hasil dikirim.
+3. Berat stabil → terkunci (bunyi), lalu tinggi stabil → terkunci (bunyi).
+4. Hasil dikirim ke web. Berat, tinggi, Z-Score, dan status ditampilkan **sekaligus** satu layar, dengan bunyi selesai. Gagal kirim disimpan di NVS dan dikirim ulang, kecuali web menolak datanya.
+5. Kartu harus dilepas dari pembaca sebelum kartu yang sama dapat terbaca lagi, sehingga alat tidak menghitung dua kali.
+
+Berat dan tinggi tidak dibulatkan: nilai terkunci di LCD sama dengan yang dikirim ke web (2 desimal, sesuai kolom database). Nada buzzer diatur pada tabel `TUNE_*` di firmware (buzzer ini paling nyaring di sekitar 2 kHz). Data mentah sensor tinggi dicetak di Serial Monitor (115200) untuk memeriksa akurasi.
 
 ## Keamanan
 
