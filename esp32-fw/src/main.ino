@@ -241,16 +241,16 @@ bool isLCDReady()
 // =============================================================
 // BUZZER
 // =============================================================
-// Buzzer ini paling nyaring di frekuensi rendah (sekitar 2 kHz); nada di atas
-// 3 kHz terdengar mengecil. Semua nada penting memakai rentang 1.7-2.6 kHz.
+// Buzzer ini terdengar jelas di sekitar 4.8 kHz (bunyi kartu di firmware lama);
+// nada sekitar 2 kHz hampir tidak terdengar. Semua nada memakai 3.8-5 kHz.
 // Ubah angka di tabel ini bila perlu menyetel suara.
 
-const Note TUNE_CARD[]   = {{2000, 100}};
-const Note TUNE_OK[]     = {{1800, 110}, {0, 80}, {2400, 180}};
-const Note TUNE_WARN[]   = {{2300, 120}, {1700, 220}, {0, 100}, {2300, 120}, {1700, 220}};
-const Note TUNE_ERROR[]  = {{1700, 170}, {0, 100}, {2300, 170}, {0, 100}, {1700, 170}, {0, 100}, {2300, 170}};
-const Note TUNE_READY[]  = {{2000, 1000}};                                         // alat siap / siap mengukur: 1 bunyi panjang
-const Note TUNE_DONE[]   = {{2000, 400}, {0, 120}, {2000, 400}, {0, 120}, {2000, 800}}; // semua hasil tampil
+const Note TUNE_CARD[]   = {{4800, 100}};
+const Note TUNE_OK[]     = {{4300, 110}, {0, 80}, {5000, 180}};
+const Note TUNE_WARN[]   = {{5000, 120}, {3800, 220}, {0, 100}, {5000, 120}, {3800, 220}};
+const Note TUNE_ERROR[]  = {{3800, 170}, {0, 100}, {4600, 170}, {0, 100}, {3800, 170}, {0, 100}, {4600, 170}};
+const Note TUNE_READY[]  = {{4800, 1000}};                                         // alat siap / siap mengukur: 1 bunyi panjang
+const Note TUNE_DONE[]   = {{4800, 400}, {0, 120}, {4800, 400}, {0, 120}, {4800, 800}}; // pemeriksaan selesai, silakan turun
 
 void play(const Note* tune, size_t count)
 {
@@ -799,7 +799,6 @@ void showResults(float weight, float height)
           "Tinggi: " + String(height, 2) + " cm",
           "Z-Score: " + String(resultZ, 2) + " SD",
           resultCategory);
-  PLAY(TUNE_DONE);
 }
 
 String sexText()
@@ -894,12 +893,13 @@ void examine(const String& uid)
 
   if (sent == SUBMIT_OK)
   {
-    showResults(weight, height); // semua hasil tampil + bunyi selesai
+    showResults(weight, height); // semua hasil tampil
 
     // Hasil tampil RESULT_HOLD_MS, lalu minta turun. Kembali ke standby setelah
     // timbangan kosong (maks. 60 detik).
     delay(RESULT_HOLD_MS);
     lcdShow("PEMERIKSAAN SELESAI", "", "Silakan turun", "dari timbangan");
+    PLAY(TUNE_DONE); // bunyi selesai
     unsigned long askedAt = millis();
     while (millis() - askedAt < 60000)
     {
@@ -952,7 +952,7 @@ void setup()
   lcdShow("SISTEM IoT", "DETEKSI STUNTING", "Inisialisasi...", "Mohon tunggu");
 
   // Buzzer; arus pin maksimum agar lebih keras
-  ledcAttach(BUZZER_PIN, 2000, 8);
+  ledcAttach(BUZZER_PIN, 4800, 8);
   gpio_set_drive_capability((gpio_num_t)BUZZER_PIN, GPIO_DRIVE_CAP_3);
   ledcWriteTone(BUZZER_PIN, 0);
 
