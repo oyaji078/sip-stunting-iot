@@ -55,6 +55,14 @@ Tombol **Tempel RFID** (Data Balita) dan **Via RFID** (Pemeriksaan) mengaktifkan
 
 Buka `firmware/kode_final.ino`, pasang library dalam `firmware/LIBRARIES.md`, pilih board ESP32, lalu upload. Pada boot pertama perangkat membuka hotspot konfigurasi. ID chip dan sandi hotspot tampil di LCD; buat perangkat dengan ID tersebut pada menu **Alat IoT**, lalu masukkan token yang dihasilkan ke portal.
 
+### Alur alat (alat merespons lebih dulu)
+
+- Kartu ditempel → buzzer berbunyi dan layar "Silakan Naik" tampil seketika; alat **tidak menunggu web**. Pengecekan kartu ke web berjalan paralel di Core 0, lalu nama dan umur (bulan) muncul di LCD bila sudah tiba.
+- Bila web menjawab kartu tidak dikenal, usia tidak sesuai, atau sedang mode tangkap, pengukuran dibatalkan dan pesan tampil. Bila web lambat/offline, alat tetap mengukur; hasil dikirim setelah berat dan tinggi terkunci (gagal kirim disimpan di NVS dan dikirim ulang, kecuali web menolak datanya).
+- Satu kartu = satu pemeriksaan. Kartu harus dilepas dari pembaca sebelum kartu yang sama terbaca lagi, dan hasil lama dibuang saat alat kembali ke standby, sehingga alat tidak menghitung dua kali tanpa kartu ditempel.
+- Berat dan tinggi tidak dibulatkan: nilai terkunci di LCD sama dengan yang dikirim ke web (2 desimal, sesuai kolom database).
+- Bunyi: satu bunyi nada naik panjang saat alat menyala dan siap dipakai, dan tiga bunyi panjang saat seluruh perhitungan selesai. Frekuensi buzzer diatur lewat `BUZZER_LOUD_HZ` di firmware.
+
 ## Keamanan
 
 Jangan commit `config/local.php`, dump database produksi, token perangkat, atau kredensial Wi-Fi. Setelah setup produksi selesai, ganti `setup_token` pada konfigurasi lokal dengan nilai acak baru.

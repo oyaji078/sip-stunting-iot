@@ -15,9 +15,24 @@ final class GrowthService
         $birth = new DateTimeImmutable($birthDate);
         $measured = new DateTimeImmutable($measuredDate);
         if ($measured < $birth) {
-            throw new InvalidArgumentException('Tanggal pemeriksaan tidak boleh sebelum tanggal lahir.');
+            throw new InvalidArgumentException('Tanggal Pemeriksaan Tidak Boleh Sebelum Tanggal Lahir.');
         }
         return (int)$birth->diff($measured)->days;
+    }
+
+    /**
+     * Umur dalam bulan kalender penuh (28 Feb -> 28 Mar = 1 bulan). Dipakai
+     * tabel balita web dan layar LCD alat agar angkanya selalu sama.
+     */
+    public static function ageInMonths(string $birthDate, string $onDate): int
+    {
+        $birth = new DateTimeImmutable($birthDate);
+        $on = new DateTimeImmutable($onDate);
+        if ($on < $birth) {
+            return 0;
+        }
+        $diff = $birth->diff($on);
+        return $diff->y * 12 + $diff->m;
     }
 
     public static function isEligible(string $birthDate, string $measuredDate): bool
@@ -30,10 +45,10 @@ final class GrowthService
     public function calculate(string $sex, string $birthDate, string $measuredDate, float $heightCm): array
     {
         if (!self::isEligible($birthDate, $measuredDate)) {
-            throw new DomainException('Usia balita harus 24 sampai kurang dari 60 bulan.');
+            throw new DomainException('Usia Balita Harus 24 Sampai Kurang Dari 60 Bulan.');
         }
         if ($heightCm < 50 || $heightCm > 150) {
-            throw new DomainException('Tinggi badan harus berada pada rentang 50–150 cm.');
+            throw new DomainException('Tinggi Badan Harus Berada Pada Rentang 50–150 cm.');
         }
 
         $ageDays = self::ageInDays($birthDate, $measuredDate);
@@ -49,7 +64,7 @@ final class GrowthService
         $stmt->execute([$sexCode, $ageDays, $measurementType]);
         $row = $stmt->fetch();
         if (!$row) {
-            throw new RuntimeException("Referensi WHO tidak ditemukan untuk umur {$ageDays} hari.");
+            throw new RuntimeException("Referensi WHO Tidak Ditemukan Untuk Umur {$ageDays} Hari.");
         }
 
         $l = (float)$row['l'];

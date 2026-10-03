@@ -149,6 +149,7 @@ final class ApiController
         json_response(['status' => 'registered', 'child' => [
             'name' => $child['name'], 'sex' => $child['sex'],
             'birth_date' => $child['birth_date'], 'age_days' => GrowthService::ageInDays($child['birth_date'], $today),
+            'age_months' => GrowthService::ageInMonths($child['birth_date'], $today),
         ]]);
     }
 
