@@ -904,11 +904,18 @@ void examine(const String& uid)
   // LOOKUP_REGISTERED, atau web tidak terjangkau: tetap ukur; web memeriksa
   // kartu saat hasil dikirim (jika gagal kirim, data disimpan di NVS).
 
-  // 3. Berat.
+  // 3. Data balita tampil lebih dulu: nama, jenis kelamin, umur. Baru menimbang.
   if (found == LOOKUP_REGISTERED)
+  {
+    lcdShow("DATA DITEMUKAN", childName, sexText() + " | " + String(childAgeMonth) + " bulan", "Silakan naik timbangan");
+    PLAY(TUNE_OK);
+    delay(2000);
     lcdShow(childName, "Berat: --.-- kg", "Menunggu stabil...", sexText() + " | " + String(childAgeMonth) + " bulan");
+  }
   else
+  {
     lcdShow("SILAKAN NAIK", "Berat: --.-- kg", "Menunggu stabil...", "Jangan bergerak");
+  }
 
   float weight = waitStableWeight();
   if (weight < 0)
