@@ -54,7 +54,7 @@ function verify_csrf(): void
 {
     if (!hash_equals($_SESSION['csrf'] ?? '', (string)($_POST['csrf'] ?? ''))) {
         http_response_code(419);
-        exit('Sesi formulir kedaluwarsa. Muat ulang halaman dan coba lagi.');
+        exit('Sesi Formulir Kedaluwarsa. Muat Ulang Halaman Dan Coba Lagi.');
     }
 }
 
@@ -77,7 +77,7 @@ function require_auth(?string $role = null): array
     }
     if ($role && $user['role'] !== $role) {
         http_response_code(403);
-        exit('Anda tidak memiliki hak akses untuk tindakan ini.');
+        exit('Anda Tidak Memiliki Hak Akses Untuk Tindakan Ini.');
     }
     return $user;
 }
@@ -112,7 +112,7 @@ function normalize_uid(string $uid): string
 {
     $hex = strtoupper(preg_replace('/[^0-9A-Fa-f]/', '', $uid));
     if ($hex === '' || strlen($hex) % 2 !== 0 || strlen($hex) > 20) {
-        throw new InvalidArgumentException('UID RFID tidak valid.');
+        throw new InvalidArgumentException('UID RFID Tidak Valid.');
     }
     return implode(':', str_split($hex, 2));
 }
@@ -126,7 +126,7 @@ function normalize_uid(string $uid): string
 function device_status(?int $secondsAgo): array
 {
     if ($secondsAgo === null) {
-        return ['Belum aktif', 'secondary'];
+        return ['Belum Aktif', 'secondary'];
     }
     return $secondsAgo <= 90 ? ['Online', 'success'] : ['Offline', 'danger'];
 }
@@ -134,21 +134,21 @@ function device_status(?int $secondsAgo): array
 function time_ago(?int $seconds): string
 {
     if ($seconds === null) {
-        return 'Belum pernah';
+        return 'Belum Pernah';
     }
     if ($seconds < 0) {
         $seconds = 0;
     }
     if ($seconds < 60) {
-        return $seconds . ' detik lalu';
+        return $seconds . ' Detik Lalu';
     }
     if ($seconds < 3600) {
-        return intdiv($seconds, 60) . ' menit lalu';
+        return intdiv($seconds, 60) . ' Menit Lalu';
     }
     if ($seconds < 86400) {
-        return intdiv($seconds, 3600) . ' jam lalu';
+        return intdiv($seconds, 3600) . ' Jam Lalu';
     }
-    return intdiv($seconds, 86400) . ' hari lalu';
+    return intdiv($seconds, 86400) . ' Hari Lalu';
 }
 
 function device_sensor_data(mixed $json): array
@@ -172,10 +172,10 @@ function device_sensor_data(mixed $json): array
 
 function format_uptime(int $seconds): string
 {
-    if ($seconds < 60) return $seconds . ' detik';
-    if ($seconds < 3600) return intdiv($seconds, 60) . ' menit';
-    if ($seconds < 86400) return intdiv($seconds, 3600) . ' jam ' . intdiv($seconds % 3600, 60) . ' menit';
-    return intdiv($seconds, 86400) . ' hari ' . intdiv($seconds % 86400, 3600) . ' jam';
+    if ($seconds < 60) return $seconds . ' Detik';
+    if ($seconds < 3600) return intdiv($seconds, 60) . ' Menit';
+    if ($seconds < 86400) return intdiv($seconds, 3600) . ' Jam ' . intdiv($seconds % 3600, 60) . ' Menit';
+    return intdiv($seconds, 86400) . ' Hari ' . intdiv($seconds % 86400, 3600) . ' Jam';
 }
 
 function rfid_scan_modal(): string
@@ -184,7 +184,7 @@ function rfid_scan_modal(): string
     $modeUrl = e(url('rfid/mode'));
     $csrf = e(csrf_token());
     return <<<HTML
-<div class="modal fade" id="rfidModal" tabindex="-1" data-scan-url="{$scanUrl}" data-mode-url="{$modeUrl}" data-csrf="{$csrf}"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Tempelkan kartu RFID</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body text-center"><div class="rfid-wait" data-rfid-icon>⌁</div><p class="mb-1" data-rfid-status>Silakan tempelkan kartu RFID pada alat…</p><small class="text-muted">Alat harus online dan terhubung ke internet.</small></div></div></div></div>
+<div class="modal fade" id="rfidModal" tabindex="-1" data-scan-url="{$scanUrl}" data-mode-url="{$modeUrl}" data-csrf="{$csrf}"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Tempelkan Kartu RFID</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body text-center"><div class="rfid-wait" data-rfid-icon>⌁</div><p class="mb-1" data-rfid-status>Silakan Tempelkan Kartu RFID Pada Alat…</p><small class="text-muted">Alat Harus Online Dan Terhubung Ke Internet.</small></div></div></div></div>
 HTML;
 }
 
@@ -206,6 +206,18 @@ function app_brand(): array
     ];
 }
 
+/**
+ * Tanggal berbahasa Indonesia, mis. "Sabtu, 03 Oktober 2026". date('l'/'F')
+ * selalu menghasilkan nama Inggris, jadi nama hari dan bulan dipetakan manual.
+ */
+function tanggal_indonesia(?int $timestamp = null): string
+{
+    $timestamp ??= time();
+    $hari = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+    $bulan = [1 => 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+    return $hari[(int)date('w', $timestamp)] . ', ' . date('d', $timestamp) . ' ' . $bulan[(int)date('n', $timestamp)] . ' ' . date('Y', $timestamp);
+}
+
 function render(string $title, callable $content, string $active = ''): void
 {
     global $config;
@@ -216,13 +228,14 @@ function render(string $title, callable $content, string $active = ''): void
 <html lang="id"><head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <title><?= e($title) ?> · <?= e($brand['name']) ?> <?= e($brand['place']) ?></title>
+    <link rel="icon" type="image/png" href="<?= e(asset_url('assets/logo.png')) ?>">
     <link rel="stylesheet" href="<?= e(url('assets/vendor/bootstrap.min.css')) ?>">
     <link rel="stylesheet" href="<?= e(asset_url('assets/app.css')) ?>">
 </head><body<?= $user && $active !== 'alat' ? ' data-live-url="' . e(url('live/version')) . '"' : '' ?>>
 <?php if ($user): ?>
 <div class="app-shell">
 <aside class="sidebar">
-    <a class="brand" href="<?= e(url()) ?>"><span class="brand-mark"><?= e($brand['initial']) ?></span><span class="brand-text"><b><?= e($brand['line1']) ?></b><?php if ($brand['line2'] !== ''): ?><b><?= e($brand['line2']) ?></b><?php endif; ?><small><?= e($brand['place']) ?></small></span></a>
+    <a class="brand" href="<?= e(url()) ?>"><img class="brand-logo" src="<?= e(asset_url('assets/logo.png')) ?>" alt="Logo <?= e($brand['name']) ?>"><span class="brand-text"><b><?= e($brand['line1']) ?></b><?php if ($brand['line2'] !== ''): ?><b><?= e($brand['line2']) ?></b><?php endif; ?><small><?= e($brand['place']) ?></small></span></a>
     <nav><?php foreach ([
         '' => ['Dashboard','bi-grid'], 'balita' => ['Data Balita','bi-people'], 'pemeriksaan' => ['Pemeriksaan','bi-clipboard2-pulse'],
         'laporan' => ['Laporan','bi-file-earmark-bar-graph'], 'alat' => ['Alat IoT','bi-router'],
@@ -232,7 +245,7 @@ function render(string $title, callable $content, string $active = ''): void
     <?php endforeach; ?></nav>
     <div class="sidebar-user"><span><?= e($user['name']) ?></span><small><?= e(ucfirst($user['role'])) ?></small><a href="<?= e(url('logout')) ?>">Keluar</a></div>
 </aside>
-<main class="main"><header><button class="menu-toggle" type="button">☰</button><div><h1><?= e($title) ?></h1><p><?= e(date('l, d F Y')) ?></p></div></header>
+<main class="main"><header><button class="menu-toggle" type="button">☰</button><div><h1><?= e($title) ?></h1><p><?= e(tanggal_indonesia()) ?></p></div></header>
 <?php else: ?><main class="auth-main">
 <?php endif; ?>
 <?php foreach ($flashes as $message): ?><div class="alert alert-<?= e($message['type']) ?> alert-dismissible fade show" role="alert"><?= e($message['message']) ?><button type="button" class="btn-close" data-bs-dismiss="alert"></button></div><?php endforeach; ?>

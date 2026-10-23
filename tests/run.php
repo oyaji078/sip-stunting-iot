@@ -31,7 +31,17 @@ $assert(normalize_uid('a1-b2-c3-d4') === 'A1:B2:C3:D4', 'normalisasi UID');
 $sensorData = device_sensor_data('{"rfid":true,"weight":false,"height":true,"lcd":true,"uptime_seconds":3661}');
 $assert($sensorData['rfid'] === true && $sensorData['weight'] === false, 'status kesehatan sensor');
 $assert($sensorData['uptime_seconds'] === 3661, 'uptime perangkat');
-$assert(format_uptime(3661) === '1 jam 1 menit', 'format uptime perangkat');
+$assert(format_uptime(3661) === '1 Jam 1 Menit', 'format uptime perangkat');
+$assert(time_ago(5) === '5 Detik Lalu', 'format waktu relatif');
+$assert(tanggal_indonesia(strtotime('2026-10-03')) === 'Sabtu, 03 Oktober 2026', 'tanggal Indonesia');
+$assert(tanggal_indonesia(strtotime('2026-01-04')) === 'Minggu, 04 Januari 2026', 'hari Minggu dan bulan Januari');
+$assert(tanggal_indonesia(strtotime('2026-12-31')) === 'Kamis, 31 Desember 2026', 'bulan Desember');
+
+// Umur dalam bulan kalender penuh: dipakai tabel web dan LCD alat.
+$assert(GrowthService::ageInMonths('2024-01-15', '2026-01-15') === 24, 'tepat 24 bulan');
+$assert(GrowthService::ageInMonths('2024-01-15', '2026-01-14') === 23, 'sehari sebelum 24 bulan');
+$assert(GrowthService::ageInMonths('2021-03-31', '2026-03-30') === 59, 'hampir 60 bulan');
+$assert(GrowthService::ageInMonths('2024-01-15', '2023-01-01') === 0, 'tanggal sebelum lahir menjadi 0');
 
 foreach ([['L', 730], ['P', 730], ['L', 1461], ['P', 1825]] as [$sex, $age]) {
     $stmt = $pdo->prepare('SELECT l,m,s FROM who_lms WHERE sex=? AND age_days=?');

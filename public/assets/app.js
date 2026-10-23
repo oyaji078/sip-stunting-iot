@@ -2,7 +2,6 @@ document.querySelector('.menu-toggle')?.addEventListener('click',()=>document.qu
 document.addEventListener('click',e=>{if(e.target.closest('.main')&&!e.target.closest('.menu-toggle'))document.querySelector('.sidebar')?.classList.remove('open')});
 const chart=document.querySelector('#categoryChart');
 if(chart&&window.Chart){const rows=JSON.parse(chart.dataset.values||'[]');const colors={'Sangat Pendek':'#9f2632','Pendek/Stunting':'#e36d48','Normal':'#238a70','Tinggi':'#4a8eb0'};new Chart(chart,{type:'doughnut',data:{labels:rows.map(x=>x.category),datasets:[{data:rows.map(x=>x.total),backgroundColor:rows.map(x=>colors[x.category]||'#ccc'),borderWidth:0}]},options:{cutout:'70%',plugins:{legend:{position:'bottom',labels:{boxWidth:10,usePointStyle:true}}}}})}
-document.querySelector('#voidModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
 document.querySelector('#deleteChildModal')?.addEventListener('show.bs.modal',e=>{
   const m=e.target,d=e.relatedTarget.dataset,n=parseInt(d.count||'0',10);
   m.querySelector('[name=id]').value=d.id;
@@ -11,9 +10,7 @@ document.querySelector('#deleteChildModal')?.addEventListener('show.bs.modal',e=
   box.classList.toggle('d-none',n<1);
   m.querySelector('[data-delete-empty]').classList.toggle('d-none',n>0);
   m.querySelector('[data-delete-count]').textContent=n;
-  m.querySelector('[data-delete-submit]').textContent=n>0?'Nonaktifkan':'Ya, hapus';
 });
-document.querySelector('#rejectModal')?.addEventListener('show.bs.modal',e=>{e.target.querySelector('[name=id]').value=e.relatedTarget.dataset.id});
 document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.getOrCreateInstance(el).show());
 
 // Monitor alat IoT: sinkronkan status perangkat dan sensor tanpa reload.
@@ -21,7 +18,7 @@ document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.ge
   const root=document.querySelector('[data-device-live]');
   if(!root)return;
   const url=root.dataset.statusUrl;
-  const sensorText=value=>value===true?'Normal':value===false?'Gangguan':'Belum ada data';
+  const sensorText=value=>value===true?'Normal':value===false?'Gangguan':'Belum Ada Data';
   const sensorClass=value=>value===true?'ok':value===false?'error':'unknown';
   async function refreshDevices(){
     try{
@@ -68,10 +65,10 @@ document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.ge
   if(zchart){
     const rows=JSON.parse(zchart.dataset.values||'[]'),line=value=>rows.map(()=>value);
     new Chart(zchart,{type:'line',data:{labels:rows.map(x=>x.date),datasets:[
-      {label:'Z-score',data:rows.map(x=>x.z),borderColor:'#e36d48',backgroundColor:'#e36d4820',fill:true,tension:.28,pointRadius:4},
+      {label:'Z-Score',data:rows.map(x=>x.z),borderColor:'#e36d48',backgroundColor:'#e36d4820',fill:true,tension:.28,pointRadius:4},
       {label:'Batas -2 SD',data:line(-2),borderColor:'#e79030',borderDash:[6,5],pointRadius:0,borderWidth:1.5},
       {label:'Batas -3 SD',data:line(-3),borderColor:'#a23f45',borderDash:[6,5],pointRadius:0,borderWidth:1.5}
-    ]},options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},scales:{y:{suggestedMin:-4,suggestedMax:4,title:{display:true,text:'Standar deviasi (SD)'}}}}});
+    ]},options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},scales:{y:{suggestedMin:-4,suggestedMax:4,title:{display:true,text:'Standar Deviasi (SD)'}}}}});
   }
 })();
 
@@ -133,24 +130,24 @@ document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.ge
     if(mode==='balita'){
       const input=document.querySelector(target);
       if(input)input.value=uid;
-      if(d.child_id)setStatus('Kartu <code>'+uid+'</code> sudah dipakai <b>'+(d.child_name||'balita lain')+'</b>. Periksa kembali.','text-warning');
-      else setStatus('UID <code>'+uid+'</code> terisi. Lengkapi data lalu simpan.','text-success');
+      if(d.child_id)setStatus('Kartu <code>'+uid+'</code> Sudah Dipakai <b>'+(d.child_name||'Balita Lain')+'</b>. Periksa Kembali.','text-warning');
+      else setStatus('UID <code>'+uid+'</code> Terisi. Lengkapi Data Lalu Simpan.','text-success');
       setTimeout(()=>modal.hide(),1400);
     }else if(mode==='pemeriksaan'){
       if(d.child_id&&d.child_active){
         const sel=document.querySelector(target);
         if(sel)sel.value=String(d.child_id);
-        setStatus('<b>'+(d.child_name||'Balita')+'</b> dipilih.','text-success');
+        setStatus('<b>'+(d.child_name||'Balita')+'</b> Dipilih.','text-success');
         setTimeout(()=>modal.hide(),1200);
       }else{
-        setStatus('UID <code>'+uid+'</code> belum terdaftar/aktif. Daftarkan dulu di menu Data Balita.','text-danger');
+        setStatus('UID <code>'+uid+'</code> Belum Terdaftar/Aktif. Daftarkan Dulu Di Menu Data Balita.','text-danger');
       }
     }
   }
   document.querySelectorAll('[data-rfid-trigger]').forEach(btn=>{
     btn.addEventListener('click',async()=>{
       mode=btn.dataset.rfidTrigger;target=btn.dataset.rfidTarget;baseId=null;
-      setStatus('Menghubungi alat…');
+      setStatus('Menghubungi Alat…');
       iconEl&&iconEl.classList.add('scanning');
       const parentEl=btn.closest('.modal.show');
       returnModalEl=parentEl||null;
@@ -164,9 +161,9 @@ document.querySelectorAll('[data-auto-show="1"]').forEach(el=>bootstrap.Modal.ge
       await poll(); // ambil titik awal scan sebelum meminta kartu
       const res=await setDeviceMode(mode==='balita'?'register':'select');
       captureActive=!!(res&&res.ok);
-      if(!res||!res.ok){setStatus('Gagal meminta alat. Muat ulang halaman lalu coba lagi.','text-danger');iconEl&&iconEl.classList.remove('scanning');return;}
-      if(res.devices_online<1)setStatus('Tidak ada alat online saat ini. Pastikan alat menyala dan terhubung internet, lalu tempelkan kartu.','text-warning');
-      else setStatus('Alat meminta kartu. Tempelkan kartu RFID pada alat (60 detik)…');
+      if(!res||!res.ok){setStatus('Gagal Meminta Alat. Muat Ulang Halaman Lalu Coba Lagi.','text-danger');iconEl&&iconEl.classList.remove('scanning');return;}
+      if(res.devices_online<1)setStatus('Tidak Ada Alat Online Saat Ini. Pastikan Alat Menyala Dan Terhubung Internet, Lalu Tempelkan Kartu.','text-warning');
+      else setStatus('Alat Meminta Kartu. Tempelkan Kartu RFID Pada Alat (60 Detik)…');
       timer=setInterval(poll,700);
     });
   });

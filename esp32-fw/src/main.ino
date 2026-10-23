@@ -1,74 +1,27 @@
 /*
 ===============================================================
- SISTEM IoT DETEKSI DINI STUNTING BALITA
- BERBASIS Z-SCORE WHO (TB/U)
+ SISTEM IoT DETEKSI DINI STUNTING BALITA (Z-SCORE TB/U WHO)
 
- PLATFORM : ESP32
- TARGET   : Balita 24 - 60 bulan
+ ESP32 + RFID RC522 + HX711 (berat) + VL53L1X (tinggi)
+ + LCD 20x4 + Buzzer. Data dikirim ke web lewat API HTTPS.
 
- FUNGSI:
- - RFID RC522 untuk identifikasi balita
- - HX711 + 4 half-bridge load cell untuk berat
- - VL53L1X untuk tinggi
- - LCD 20x4
- - Buzzer
- - WiFi
- - Komunikasi PHP/MySQL melalui API
+ ALUR (satu kartu = satu pemeriksaan)
+   1. Kartu ditempel  -> BUNYI dan layar "Silakan Naik" seketika
+   2. Cek kartu ke web -> nama, jenis kelamin, umur tampil
+   3. Berat stabil     -> terkunci
+   4. Tinggi stabil    -> terkunci
+   5. Kirim ke web     -> semua hasil tampil sekaligus + bunyi selesai
 
-===============================================================
- PIN FINAL
-===============================================================
+ Berat dan tinggi TIDAK dibulatkan. Angka di LCD saat terkunci
+ sama persis dengan yang dikirim ke web (2 desimal, sama dengan
+ kolom database).
 
- TOF VL53L1X
- SDA -> GPIO 21
- SCL -> GPIO 22
-
- LCD 20x4 PCF8574
- SDA -> GPIO 32
- SCL -> GPIO 33
-
- HX711
- DT  -> GPIO 16
- SCK -> GPIO 4
-
- RFID RC522
- SDA/SS -> GPIO 5
- SCK    -> GPIO 18
- MOSI   -> GPIO 19
- MISO   -> GPIO 23
- RST    -> GPIO 27
-
- BUZZER
- GPIO 25
-
-===============================================================
- KALIBRASI BERAT
-===============================================================
-
- Faktor kalibrasi:
- 27312.27
-
- Sensor tinggi dari lantai:
- 149.50 cm
-
-===============================================================
- CATATAN PENTING
-===============================================================
-
- Tinggi TIDAK dibulatkan sebelum perhitungan WHO LMS.
-
- Contoh:
- Sensor membaca 88.60 cm
-
- Yang dikirim ke API:
- 88.60 cm
-
- BUKAN:
- 89 cm
-
- PHP/MySQL menggunakan tinggi presisi tersebut
- untuk menghitung Z-Score WHO.
-
+ PIN
+   VL53L1X  SDA 21, SCL 22
+   LCD I2C  SDA 32, SCL 33 (PCF8574, alamat 0x27)
+   HX711    DT 16, SCK 4
+   RC522    SS 5, SCK 18, MOSI 19, MISO 23, RST 27
+   Buzzer   GPIO 25
 ===============================================================
 */
 
@@ -81,21 +34,61 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <Wire.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
-#include <freertos/semphr.h>
-#include <freertos/task.h>
+#include <driver/gpio.h>
+#include <algorithm>
 #include "HX711.h"
 #include <VL53L1X.h>
 
 // =============================================================
-// WIFI
+// KONFIGURASI
 // =============================================================
 
 const char* API_BASE_URL = "https://posyandu.oypoint.online/api/v1";
 const char* FIRMWARE_VERSION = "2.1.0";
+const char* DEVICE_ID = "SIP-STUNTING-01";
 
-// ISRG Root X1 (Let's Encrypt), valid until 2035.
+#define TOF_SDA 21
+#define TOF_SCL 22
+#define LCD_SDA 32
+#define LCD_SCL 33
+#define HX711_DT 16
+#define HX711_SCK 4
+#define RFID_SS 5
+#define RFID_RST 27
+#define RFID_SCK 18
+#define RFID_MISO 23
+#define RFID_MOSI 19
+#define BUZZER_PIN 25
+
+#define LCD_ADDRESS 0x27
+#define LCD_RS 0x01
+#define LCD_EN 0x04
+#define LCD_BL 0x08
+
+// Berat
+const float CALIBRATION_FACTOR = 27312.27;
+const float MIN_WEIGHT = 2.00;               // di bawah ini dianggap belum naik
+const float STABLE_TOLERANCE = 0.10;         // selisih antar pembacaan (kg)
+const unsigned long STABLE_TIME = 1500;      // harus stabil selama ini (ms)
+const unsigned long WEIGHT_TIMEOUT = 120000; // batal bila tidak ada yang naik
+
+// Tinggi (sensor dipasang 149.50 cm dari lantai)
+const float SENSOR_HEIGHT_CM = 149.50;
+const float MIN_HEIGHT_CM = 50.00;
+const float MAX_HEIGHT_CM = 150.00;
+const float HEIGHT_STABLE_TOLERANCE = 0.50;
+const unsigned long HEIGHT_STABLE_TIME = 2000;
+const unsigned long HEIGHT_TIMEOUT = 60000;
+const int HEIGHT_SAMPLES = 7; // median 7 pembacaan terakhir
+
+// Hasil tetap tampil minimal selama ini, walau anak sudah turun dari timbangan
+const unsigned long RESULT_HOLD_MS = 10000;
+
+// Jaringan
+// Heartbeat jarang saja: tiap permintaan web menahan pembacaan kartu sejenak.
+const unsigned long HEARTBEAT_INTERVAL = 30000;
+
+// ISRG Root X1 (Let's Encrypt), berlaku sampai 2035.
 const char* ROOT_CA = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -129,511 +122,162 @@ mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
 emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )EOF";
-Preferences preferences;
-String deviceId;
-String deviceToken;
-int authFailureCount = 0;
-
-// Satu koneksi HTTPS dipakai ulang (keep-alive) untuk semua request. Handshake
-// TLS di ESP32 memakan 1-3 detik; dibuat baru tiap request membuat loop macet
-// dan kartu RFID terasa sangat lambat terbaca.
-WiFiClientSecure secureClient;
-bool secureClientReady = false;
-SemaphoreHandle_t apiMutex = nullptr;
-unsigned long lastHeartbeatAt = 0;
-unsigned long lastPendingRetryAt = 0;
-bool pendingMeasurement = false;
-String pendingUid;
-String pendingRequestId;
-float pendingWeight = 0;
-float pendingHeight = 0;
-bool rfidReady = false;
-bool scaleReady = false;
-bool tofReady = false;
-bool lcdReady = false;
-
-// Mode tangkap kartu dari website: "off", "register" (daftar balita),
-// atau "select" (pilih balita untuk pemeriksaan). Saat aktif, kartu yang
-// ditempel hanya dikirim ke web dan TIDAK memulai penimbangan.
-String captureMode = "off";
-unsigned long lastModePollAt = 0;
-unsigned long modePollInterval = 1000;
-unsigned long lastRFIDHealthCheckAt = 0;
-const unsigned long RFID_HEALTH_CHECK_INTERVAL = 5000;
-
-enum RFIDCheckResult
-{
-  RFID_REGISTERED,
-  RFID_UNKNOWN,
-  RFID_INELIGIBLE,
-  RFID_CAPTURED,
-  RFID_CAPTURED_REGISTERED,
-  RFID_API_ERROR
-};
-
-// FIX: non-blocking - UID ditampung di RAM dan dikirim oleh task Core 0.
-// String aman dipakai di sini karena ring buffer tidak disalin byte-per-byte
-// oleh FreeRTOS; seluruh aksesnya dilindungi mutex.
-struct QueueData
-{
-  String uid;
-  unsigned long timestamp;
-};
-
-struct RFIDResultData
-{
-  RFIDCheckResult result;
-  char uid[40];
-  char childName[64];
-  char childSex[8];
-  int childAgeMonth;
-  unsigned long timestamp;
-};
-
-const uint8_t RFID_QUEUE_CAPACITY = 20;
-QueueData rfidUploadQueue[RFID_QUEUE_CAPACITY];
-uint8_t rfidQueueHead = 0;
-uint8_t rfidQueueTail = 0;
-uint8_t rfidQueueCount = 0;
-SemaphoreHandle_t rfidQueueMutex = nullptr;
-QueueHandle_t rfidResultQueue = nullptr;
-TaskHandle_t taskRFIDHandle = nullptr;
-TaskHandle_t taskUploadHandle = nullptr;
-RFIDCheckResult queuedRFIDResult = RFID_API_ERROR;
 
 // =============================================================
-// PIN
-// =============================================================
-
-// ---------------- TOF ----------------
-#define TOF_SDA 21
-#define TOF_SCL 22
-
-// ---------------- LCD ----------------
-#define LCD_SDA 32
-#define LCD_SCL 33
-
-// ---------------- HX711 ----------------
-#define HX711_DT  16
-#define HX711_SCK 4
-
-// ---------------- RFID ----------------
-#define RFID_SS   5
-#define RFID_RST  27
-
-#define RFID_SCK  18
-#define RFID_MISO 23
-#define RFID_MOSI 19
-
-// ---------------- BUZZER ----------------
-#define BUZZER_PIN 25
-
-// =============================================================
-// OBJEK SENSOR
+// OBJEK DAN STATUS
 // =============================================================
 
 HX711 scale;
 VL53L1X tof;
-
 MFRC522 rfid(RFID_SS, RFID_RST);
-
-// I2C khusus LCD
 TwoWire I2C_LCD = TwoWire(1);
+Preferences prefs;
+WiFiClientSecure secureClient;
 
-// =============================================================
-// KONFIGURASI LCD PCF8574
-// =============================================================
+String deviceToken;
+bool rfidReady = false, scaleReady = false, tofReady = false, lcdReady = false;
+bool secureClientReady = false;
+int authFailures = 0;
 
-#define LCD_ADDRESS 0x27
+unsigned long lastHeartbeatAt = 0;
+unsigned long lastRfidCheckAt = 0;
+unsigned long lastReconnectAt = 0;
 
-#define LCD_RS 0x01
-#define LCD_RW 0x02
-#define LCD_EN 0x04
-#define LCD_BL 0x08
+// Satu kartu = satu pemeriksaan: kartu yang baru dipakai harus dilepas dulu.
+bool cardMustLeave = false;
+unsigned long cardSeenAt = 0;
 
-// =============================================================
-// KALIBRASI HX711
-// =============================================================
-
-const float CALIBRATION_FACTOR = 27312.27;
-
-// =============================================================
-// KONFIGURASI BERAT
-// =============================================================
-
-const float MIN_WEIGHT = 2.00;
-
-// toleransi kestabilan
-const float STABLE_TOLERANCE = 0.10;
-
-// harus stabil selama 1.5 detik
-const unsigned long STABLE_TIME = 1500;
-
-// setelah LOCK ditampilkan
-const unsigned long WEIGHT_LOCK_TIME = 2000;
-
-// =============================================================
-// KONFIGURASI TINGGI
-// =============================================================
-
-// posisi sensor dari lantai
-const float SENSOR_HEIGHT_CM = 149.50;
-
-// batas pengukuran
-const float MIN_HEIGHT_CM = 50.00;
-const float MAX_HEIGHT_CM = 150.00;
-
-// toleransi tinggi
-const float HEIGHT_STABLE_TOLERANCE = 0.50;
-
-// harus stabil selama 2 detik
-const unsigned long HEIGHT_STABLE_TIME = 2000;
-
-// =============================================================
-// VARIABEL DATA BALITA
-// =============================================================
-
-String currentUID = "";
-
-String childName = "";
-String childSex  = "";
-
+// Data balita dari web
+String childName, childSex;
 int childAgeMonth = 0;
 
-// =============================================================
-// VARIABEL HASIL PEMERIKSAAN
-// =============================================================
+// Hasil dari web
+float resultZ = 0;
+String resultCategory;
 
-float finalWeight = 0.00;
-float finalHeight = 0.00;
+// Pemeriksaan yang belum terkirim (tersimpan di NVS)
+bool hasPending = false;
+String pendingUid, pendingRequest;
+float pendingWeight = 0, pendingHeight = 0;
+unsigned long lastPendingTryAt = 0;
 
-float finalZScore = 0.00;
+String rejectReason;
 
-String finalCategory = "";
+enum LookupResult { LOOKUP_REGISTERED, LOOKUP_UNKNOWN, LOOKUP_INELIGIBLE, LOOKUP_CAPTURED, LOOKUP_CAPTURED_REGISTERED, LOOKUP_ERROR };
+enum SubmitResult { SUBMIT_OK, SUBMIT_RETRY, SUBMIT_REJECTED };
 
-// =============================================================
-// STATE SISTEM
-// =============================================================
-
-enum SystemState
-{
-  STATE_STANDBY,
-  STATE_CHECK_RFID,
-  STATE_UNKNOWN_RFID,
-  STATE_REGISTERED,
-  STATE_WEIGHING,
-  STATE_WEIGHT_LOCK,
-  STATE_HEIGHT_MEASURING,
-  STATE_RESULT_Z,
-  STATE_RESULT_ALL,
-  STATE_FINISH
-};
-
-volatile SystemState currentState = STATE_STANDBY;
+struct Note { bool on; uint16_t ms; }; // pola buzzer: bunyi/diam selama ms
 
 // =============================================================
-// TIMER
+// LCD 20x4 (PCF8574, 4-bit)
 // =============================================================
 
-unsigned long stateStartTime = 0;
-
-unsigned long stableWeightStart = 0;
-unsigned long stableHeightStart = 0;
-
-// =============================================================
-// VARIABEL FILTER BERAT
-// =============================================================
-
-float previousWeight = 0.00;
-float stableWeight = 0.00;
-
-bool weightStable = false;
-
-// =============================================================
-// VARIABEL FILTER TINGGI
-// =============================================================
-
-float previousHeight = 0.00;
-float stableHeight = 0.00;
-
-bool heightStable = false;
-
-// buffer median tinggi
-const int HEIGHT_SAMPLE_COUNT = 7;
-float heightSamples[HEIGHT_SAMPLE_COUNT];
-int heightSampleIndex = 0;
-
-// =============================================================
-// LCD LOW LEVEL
-// =============================================================
-
-void lcdExpanderWrite(uint8_t data)
+void lcdWrite(uint8_t data)
 {
   I2C_LCD.beginTransmission(LCD_ADDRESS);
   I2C_LCD.write(data | LCD_BL);
   I2C_LCD.endTransmission();
 }
 
-void lcdPulseEnable(uint8_t data)
+void lcdNibble(uint8_t nibble, uint8_t mode)
 {
-  lcdExpanderWrite(data | LCD_EN);
+  uint8_t data = (nibble << 4) | mode;
+  lcdWrite(data | LCD_EN);
   delayMicroseconds(1);
-
-  lcdExpanderWrite(data & ~LCD_EN);
+  lcdWrite(data);
   delayMicroseconds(50);
 }
 
-void lcdWrite4Bits(uint8_t value)
+void lcdByte(uint8_t value, uint8_t mode)
 {
-  uint8_t data = 0;
-
-  if (value & 0x01) data |= 0x10;
-  if (value & 0x02) data |= 0x20;
-  if (value & 0x04) data |= 0x40;
-  if (value & 0x08) data |= 0x80;
-
-  lcdExpanderWrite(data);
-  lcdPulseEnable(data);
-}
-
-void lcdSend(uint8_t value, uint8_t mode)
-{
-  uint8_t high = value >> 4;
-  uint8_t low  = value & 0x0F;
-
-  uint8_t highData = 0;
-  uint8_t lowData  = 0;
-
-  if (high & 0x01) highData |= 0x10;
-  if (high & 0x02) highData |= 0x20;
-  if (high & 0x04) highData |= 0x40;
-  if (high & 0x08) highData |= 0x80;
-
-  if (low & 0x01) lowData |= 0x10;
-  if (low & 0x02) lowData |= 0x20;
-  if (low & 0x04) lowData |= 0x40;
-  if (low & 0x08) lowData |= 0x80;
-
-  highData |= mode;
-  lowData  |= mode;
-
-  lcdPulseEnable(highData);
-  lcdPulseEnable(lowData);
-}
-
-void lcdCommand(uint8_t command)
-{
-  lcdSend(command, 0);
-}
-
-void lcdWriteChar(char c)
-{
-  lcdSend(c, LCD_RS);
+  lcdNibble(value >> 4, mode);
+  lcdNibble(value & 0x0F, mode);
 }
 
 void lcdClear()
 {
-  lcdCommand(0x01);
+  lcdByte(0x01, 0);
   delay(2);
 }
 
-void lcdSetCursor(uint8_t col, uint8_t row)
+// Tulis satu baris penuh (sisa baris dibersihkan dengan spasi).
+void lcdLine(uint8_t row, String text)
 {
-  static const uint8_t rowOffsets[] =
-  {
-    0x00,
-    0x40,
-    0x14,
-    0x54
-  };
-
-  lcdCommand(0x80 | (col + rowOffsets[row]));
+  static const uint8_t offset[] = {0x00, 0x40, 0x14, 0x54};
+  lcdByte(0x80 | offset[row], 0);
+  for (uint8_t i = 0; i < 20; i++)
+    lcdByte(i < text.length() ? text[i] : ' ', LCD_RS);
 }
 
-void lcdPrint(String text)
+void lcdShow(String l0, String l1 = "", String l2 = "", String l3 = "")
 {
-  for (uint16_t i = 0; i < text.length(); i++)
-  {
-    lcdWriteChar(text[i]);
-  }
-}
-
-void lcdPrintLine(uint8_t row, String text)
-{
-  lcdSetCursor(0, row);
-
-  while (text.length() < 20)
-    text += " ";
-
-  if (text.length() > 20)
-    text = text.substring(0, 20);
-
-  lcdPrint(text);
+  lcdLine(0, l0);
+  lcdLine(1, l1);
+  lcdLine(2, l2);
+  lcdLine(3, l3);
 }
 
 void lcdBegin()
 {
   delay(50);
-
-  lcdWrite4Bits(0x03);
+  lcdNibble(0x03, 0);
   delay(5);
-
-  lcdWrite4Bits(0x03);
+  lcdNibble(0x03, 0);
   delayMicroseconds(150);
-
-  lcdWrite4Bits(0x03);
-  lcdWrite4Bits(0x02);
-
-  lcdCommand(0x28); // 4-bit, 2-line, 5x8
-  lcdCommand(0x0C); // display ON
-  lcdCommand(0x06); // cursor increment
+  lcdNibble(0x03, 0);
+  lcdNibble(0x02, 0);
+  lcdByte(0x28, 0); // 4-bit, 2 baris, 5x8
+  lcdByte(0x0C, 0); // layar hidup
+  lcdByte(0x06, 0);
   lcdClear();
+}
+
+bool isLCDReady()
+{
+  I2C_LCD.beginTransmission(LCD_ADDRESS);
+  return I2C_LCD.endTransmission() == 0;
 }
 
 // =============================================================
 // BUZZER
 // =============================================================
+// Buzzer AKTIF: punya osilator sendiri, jadi cukup diberi HIGH agar berbunyi
+// paling keras. Sinyal PWM bernada justru membuatnya pelan. Pola bunyi dibedakan
+// dari panjang bunyi dan jeda (ms) di tabel ini.
 
-void buzzerOn(int frequency = 5000)
+#define ON true
+#define OFF false
+
+const Note TUNE_CARD[]   = {{ON, 100}};
+const Note TUNE_OK[]     = {{ON, 110}, {OFF, 80}, {ON, 180}};
+const Note TUNE_WARN[]   = {{ON, 120}, {OFF, 60}, {ON, 220}, {OFF, 100}, {ON, 120}, {OFF, 60}, {ON, 220}};
+const Note TUNE_ERROR[]  = {{ON, 170}, {OFF, 100}, {ON, 170}, {OFF, 100}, {ON, 170}, {OFF, 100}, {ON, 170}};
+const Note TUNE_READY[]  = {{ON, 1000}};                                         // alat siap / siap mengukur: 1 bunyi panjang
+const Note TUNE_DONE[]   = {{ON, 400}, {OFF, 120}, {ON, 400}, {OFF, 120}, {ON, 800}}; // pemeriksaan selesai, silakan turun
+
+void play(const Note* tune, size_t count)
 {
-  ledcWriteTone(BUZZER_PIN, frequency);
-}
-
-void buzzerOff()
-{
-  ledcWriteTone(BUZZER_PIN, 0);
-}
-
-void beepShort()
-{
-  buzzerOn(5000);
-  delay(100);
-  buzzerOff();
-}
-
-void beepDouble()
-{
-  buzzerOn(5000);
-  delay(100);
-  buzzerOff();
-
-  delay(100);
-
-  buzzerOn(5000);
-  delay(100);
-  buzzerOff();
-}
-
-void beepLong()
-{
-  buzzerOn(5000);
-  delay(500);
-  buzzerOff();
-}
-
-void beepSuccess()
-{
-  buzzerOn(2800);
-  delay(110);
-  buzzerOff();
-  delay(80);
-  buzzerOn(4300);
-  delay(180);
-  buzzerOff();
-}
-
-void beepError()
-{
-  for (int i = 0; i < 3; i++)
+  for (size_t i = 0; i < count; i++)
   {
-    buzzerOn(1200);
-    delay(170);
-    buzzerOff();
-    if (i < 2) delay(100);
+    digitalWrite(BUZZER_PIN, tune[i].on ? HIGH : LOW);
+    delay(tune[i].ms);
   }
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
-// Peringatan khusus saat kartu yang ditempel pada mode pendaftaran
-// ternyata sudah terhubung dengan balita lain.
-void beepAlreadyRegistered()
-{
-  for (int i = 0; i < 2; i++)
-  {
-    buzzerOn(3600);
-    delay(120);
-    buzzerOn(1700);
-    delay(220);
-    buzzerOff();
-    if (i == 0) delay(100);
-  }
-}
-
-// Bunyi sangat singkat: kartu baru saja terbaca secara lokal.
-void beepCardDetected()
-{
-  buzzerOn(4800);
-  delay(65);
-  buzzerOff();
-}
-
-// Dua nada rendah-menengah: data berat sudah stabil dan terkunci.
-void beepWeightLocked()
-{
-  buzzerOn(1800);
-  delay(130);
-  buzzerOff();
-  delay(75);
-  buzzerOn(2600);
-  delay(190);
-  buzzerOff();
-}
-
-// Tiga nada naik: data tinggi sudah stabil dan terkunci.
-void beepHeightLocked()
-{
-  const int notes[] = {2600, 3400, 4200};
-  const int durations[] = {90, 110, 230};
-  for (int i = 0; i < 3; i++)
-  {
-    buzzerOn(notes[i]);
-    delay(durations[i]);
-    buzzerOff();
-    if (i < 2) delay(65);
-  }
-}
-
-// Empat nada khas: hasil server sudah tampil dan pemeriksaan selesai.
-void beepResultReady()
-{
-  const int notes[] = {2200, 3000, 3900, 5000};
-  const int durations[] = {120, 120, 150, 350};
-  for (int i = 0; i < 4; i++)
-  {
-    buzzerOn(notes[i]);
-    delay(durations[i]);
-    buzzerOff();
-    if (i < 3) delay(70);
-  }
-}
+#define PLAY(tune) play(tune, sizeof(tune) / sizeof(tune[0]))
 
 // =============================================================
-// WIFI
+// WIFI DAN API
 // =============================================================
 
+// Menghubungkan WiFi lewat WiFiManager. Token perangkat dari website diisi
+// pada portal ini (hotspot SIP-STUNTING-IOT, sandi SIPSTUNTING).
 void connectWiFi(bool forcePortal = false)
 {
-  // Instalasi ini hanya memakai satu alat. Identitas API ditentukan oleh
-  // token, bukan lagi oleh ID chip ESP32 yang dapat berubah saat board diganti.
-  deviceId = "SIP-STUNTING-01";
-
-  String apName = "SIP-STUNTING-IOT";
-  String apPassword = "SIPSTUNTING";
   char tokenBuffer[97];
   deviceToken.substring(0, 96).toCharArray(tokenBuffer, sizeof(tokenBuffer));
 
-  // Token belum tersimpan (belum pernah dikonfigurasi) harus tetap membuka
-  // portal walau WiFi sudah tersimpan/terhubung, karena field token hanya
-  // ada di halaman portal ini.
   bool needsPortal = forcePortal || deviceToken.length() < 32;
 
   WiFiManager manager;
@@ -642,75 +286,64 @@ void connectWiFi(bool forcePortal = false)
   manager.setConfigPortalTimeout(180);
   manager.setConnectTimeout(20);
 
-  lcdClear();
-  lcdPrintLine(0, needsPortal ? "KONFIGURASI ALAT" : "MENGHUBUNGKAN WIFI");
-  lcdPrintLine(1, deviceId);
-  if (needsPortal || WiFi.SSID().isEmpty()) {
-    lcdPrintLine(2, apName);
-    lcdPrintLine(3, "Sandi: " + apPassword);
-  } else {
-    lcdPrintLine(2, "Mohon tunggu...");
-  }
+  bool showHotspot = needsPortal || WiFi.SSID().isEmpty();
+  lcdShow(needsPortal ? "KONFIGURASI ALAT" : "MENGHUBUNGKAN WIFI", DEVICE_ID,
+          showHotspot ? "SIP-STUNTING-IOT" : "Mohon tunggu...",
+          showHotspot ? "Sandi: SIPSTUNTING" : "");
 
   bool connected = needsPortal
-    ? manager.startConfigPortal(apName.c_str(), apPassword.c_str())
-    : manager.autoConnect(apName.c_str(), apPassword.c_str());
+    ? manager.startConfigPortal("SIP-STUNTING-IOT", "SIPSTUNTING")
+    : manager.autoConnect("SIP-STUNTING-IOT", "SIPSTUNTING");
 
-  String submittedToken = String(tokenParam.getValue());
-  submittedToken.trim();
-  if (submittedToken.length() >= 32 && submittedToken != deviceToken) {
-    deviceToken = submittedToken;
-    preferences.putString("device_token", deviceToken);
+  String submitted = String(tokenParam.getValue());
+  submitted.trim();
+  if (submitted.length() >= 32 && submitted != deviceToken)
+  {
+    deviceToken = submitted;
+    prefs.putString("device_token", deviceToken);
   }
 
-  if (connected) {
-    // Matikan hemat daya WiFi: mode tidur modem menambah latensi tiap paket.
-    WiFi.setSleep(false);
+  if (connected)
+  {
+    WiFi.setSleep(false); // mode tidur modem menambah latensi tiap paket
+    // Waktu harus benar agar sertifikat HTTPS valid.
     configTime(8 * 3600, 0, "pool.ntp.org", "time.google.com");
-    time_t now = time(nullptr);
-    unsigned long waitStarted = millis();
-    while (now < 1700000000 && millis() - waitStarted < 10000) {
+    unsigned long started = millis();
+    while (time(nullptr) < 1700000000 && millis() - started < 10000)
       delay(250);
-      now = time(nullptr);
-    }
   }
 
-  lcdPrintLine(3, connected ? "WiFi Terhubung" : "WiFi Gagal");
+  lcdLine(3, connected ? "WiFi Terhubung" : "WiFi Gagal");
   Serial.println(connected ? "WiFi TERHUBUNG" : "WiFi GAGAL");
   delay(1200);
 }
 
-// =============================================================
-// RECONNECT WIFI
-// =============================================================
-
-bool ensureWiFi()
+// Coba sambung ulang WiFi paling cepat tiap 5 detik, tanpa menunggu.
+void kickWiFiReconnect()
 {
-  if (WiFi.status() == WL_CONNECTED)
-    return true;
-
+  if (millis() - lastReconnectAt < 5000) return;
+  lastReconnectAt = millis();
   WiFi.reconnect();
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) delay(250);
-  return WiFi.status() == WL_CONNECTED;
 }
 
-int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
+// Kirim JSON ke API. Mengembalikan kode HTTP (<= 0 bila gagal terhubung).
+// waitWiFi = true: tunggu sampai 8 detik bila WiFi sedang putus.
+int apiPost(const char* endpoint, JsonDocument& request, JsonDocument& response, bool waitWiFi = false)
 {
-  if (deviceToken.length() < 32)
-    return -1;
+  if (deviceToken.length() < 32) return -1;
 
-  // FIX: non-blocking - semua HTTPS berjalan di luar task RFID. Mutex ini
-  // mencegah heartbeat, mode web, dan upload memakai TLS client bersamaan.
-  if (apiMutex && xSemaphoreTake(apiMutex, portMAX_DELAY) != pdTRUE)
-    return -1;
-
-  if (!ensureWiFi()) {
-    if (apiMutex) xSemaphoreGive(apiMutex);
-    return -1;
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    if (!waitWiFi) return -1;
+    WiFi.reconnect();
+    unsigned long started = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - started < 8000) delay(250);
+    if (WiFi.status() != WL_CONNECTED) return -1;
   }
 
-  if (!secureClientReady) {
+  // Satu koneksi HTTPS dipakai ulang (keep-alive): handshake TLS memakan 1-3 detik.
+  if (!secureClientReady)
+  {
     secureClient.setCACert(ROOT_CA);
     secureClientReady = true;
   }
@@ -722,9 +355,7 @@ int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
   int code = -1;
   String raw;
 
-  // Percobaan kedua hanya bila koneksi lama yang dipakai ulang ternyata sudah
-  // ditutup server. Aman diulang: heartbeat/lookup idempoten dan pengiriman
-  // pemeriksaan memakai request_id.
+  // Percobaan kedua hanya bila koneksi lama ternyata sudah ditutup server.
   for (int attempt = 0; attempt < 2; attempt++)
   {
     bool reused = secureClient.connected();
@@ -732,11 +363,8 @@ int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
     HTTPClient http;
     http.setReuse(true);
     http.setConnectTimeout(2500);
-    http.setTimeout(2000);
-    if (!http.begin(secureClient, url)) {
-      if (apiMutex) xSemaphoreGive(apiMutex);
-      return -1;
-    }
+    http.setTimeout(2500);
+    if (!http.begin(secureClient, url)) return -1;
 
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Accept", "application/json");
@@ -749,29 +377,93 @@ int apiPost(String endpoint, JsonDocument &request, JsonDocument &response)
     if (code > 0) break;
 
     secureClient.stop(); // koneksi rusak: buang dan buka yang baru
-    if (!reused) break;  // sudah koneksi baru, tidak perlu diulang
+    if (!reused) break;
   }
 
-  if (apiMutex) xSemaphoreGive(apiMutex);
+  if (code == 401 || code == 403) authFailures++;
+  else if (code > 0) authFailures = 0;
 
-  if (code == 401 || code == 403) {
-    authFailureCount++;
-  } else if (code > 0) {
-    authFailureCount = 0;
-  }
-
-  if (raw.length() > 0) {
-    DeserializationError error = deserializeJson(response, raw);
-    if (error) {
-      Serial.println("JSON API tidak valid: " + raw);
-      return -2;
-    }
+  if (raw.length() > 0 && deserializeJson(response, raw))
+  {
+    Serial.println("JSON API tidak valid: " + raw);
+    return -2;
   }
   return code;
 }
 
+// Cek kartu ke web: terdaftar, tidak dikenal, usia tidak sesuai, atau
+// website sedang meminta kartu (mode tangkap).
+LookupResult lookupCard(const String& uid)
+{
+  childName = "";
+  childSex = "";
+  childAgeMonth = 0;
+
+  JsonDocument request;
+  JsonDocument response;
+  request["uid"] = uid;
+  int code = apiPost("rfid/lookup", request, response);
+  if (code <= 0) return LOOKUP_ERROR;
+
+  String status = response["status"] | "error";
+
+  if (status == "captured")
+  {
+    bool registered = response["registered"] | false;
+    String mode = response["mode"] | "";
+    return (mode == "register" && registered) ? LOOKUP_CAPTURED_REGISTERED : LOOKUP_CAPTURED;
+  }
+  if (status == "registered")
+  {
+    childName = response["child"]["name"].as<String>();
+    childSex = response["child"]["sex"].as<String>();
+    // Umur (bulan kalender) dihitung server; hari/30.4375 hanya cadangan.
+    JsonObject child = response["child"];
+    if (child["age_months"].is<int>())
+      childAgeMonth = child["age_months"].as<int>();
+    else
+      childAgeMonth = (int)(child["age_days"].as<int>() / 30.4375f);
+    return LOOKUP_REGISTERED;
+  }
+  if (status == "unknown") return LOOKUP_UNKNOWN;
+  if (status == "ineligible" || status == "inactive") return LOOKUP_INELIGIBLE;
+  return LOOKUP_ERROR;
+}
+
+// Kirim hasil pemeriksaan. Nilai dikirim apa adanya (2 desimal), tanpa pembulatan.
+SubmitResult submitMeasurement(const String& uid, float weight, float height, const String& requestId)
+{
+  JsonDocument request;
+  JsonDocument response;
+  request["request_id"] = requestId;
+  request["uid"] = uid;
+  request["weight_kg"] = serialized(String(weight, 2));
+  request["height_cm"] = serialized(String(height, 2));
+  int code = apiPost("measurements", request, response, true);
+
+  if (code == 200 && String(response["status"] | "") == "success")
+  {
+    resultZ = response["z_score"].as<float>();
+    resultCategory = response["category"].as<String>();
+    return SUBMIT_OK;
+  }
+
+  // Web menolak data (kartu tidak terdaftar, usia tidak sesuai, di luar rentang):
+  // dikirim ulang tidak akan berhasil.
+  if (code == 400 || code == 404 || code == 422)
+  {
+    rejectReason = response["error"]["message"] | "Data ditolak web";
+    return SUBMIT_REJECTED;
+  }
+
+  return SUBMIT_RETRY; // tidak ada internet / server bermasalah
+}
+
 void sendHeartbeat()
 {
+  scaleReady = scale.wait_ready_timeout(200);
+  lcdReady = isLCDReady();
+
   JsonDocument request;
   JsonDocument response;
   request["firmware_version"] = FIRMWARE_VERSION;
@@ -784,991 +476,57 @@ void sendHeartbeat()
   sensors["lcd"] = lcdReady;
   int code = apiPost("heartbeat", request, response);
   Serial.println("Heartbeat HTTP " + String(code));
-  if (authFailureCount >= 3) {
-    authFailureCount = 0;
-    secureClient.stop(); // bebaskan memori TLS sebelum portal konfigurasi
-    connectWiFi(true);
-  }
 }
 
 // =============================================================
-// URL ENCODING SEDERHANA
+// STANDBY
 // =============================================================
-
-String urlEncode(String value)
-{
-  String encoded = "";
-
-  const char *hex = "0123456789ABCDEF";
-
-  for (int i = 0; i < value.length(); i++)
-  {
-    char c = value[i];
-
-    if (
-      (c >= 'a' && c <= 'z') ||
-      (c >= 'A' && c <= 'Z') ||
-      (c >= '0' && c <= '9') ||
-      c == '-' ||
-      c == '_' ||
-      c == '.' ||
-      c == '~'
-    )
-    {
-      encoded += c;
-    }
-    else
-    {
-      encoded += '%';
-      encoded += hex[(c >> 4) & 0x0F];
-      encoded += hex[c & 0x0F];
-    }
-  }
-
-  return encoded;
-}
-
-// =============================================================
-// AMBIL VALUE JSON SEDERHANA
-// =============================================================
-
-String getJsonString(String json, String key)
-{
-  String search = "\"" + key + "\"";
-
-  int p = json.indexOf(search);
-
-  if (p < 0)
-    return "";
-
-  p = json.indexOf(':', p);
-
-  if (p < 0)
-    return "";
-
-  p++;
-
-  while (p < json.length() &&
-         (json[p] == ' ' || json[p] == '\"'))
-  {
-    p++;
-  }
-
-  int end;
-
-  if (json[p - 1] == '\"')
-    end = json.indexOf('\"', p);
-  else
-    end = json.indexOf(',', p);
-
-  if (end < 0)
-    end = json.indexOf('}', p);
-
-  if (end < 0)
-    return "";
-
-  return json.substring(p, end);
-}
-
-float getJsonFloat(String json, String key)
-{
-  String value = getJsonString(json, key);
-
-  if (value == "")
-    return 0.0;
-
-  return value.toFloat();
-}
-
-int getJsonInt(String json, String key)
-{
-  String value = getJsonString(json, key);
-
-  if (value == "")
-    return 0;
-
-  return value.toInt();
-}
-
-// =============================================================
-// RFID UID
-// =============================================================
-
-String readRFIDUID()
-{
-  String uid = "";
-
-  for (byte i = 0; i < rfid.uid.size; i++)
-  {
-    if (i > 0)
-      uid += ":";
-
-    if (rfid.uid.uidByte[i] < 0x10)
-      uid += "0";
-
-    uid += String(rfid.uid.uidByte[i], HEX);
-  }
-
-  uid.toUpperCase();
-
-  return uid;
-}
-
-// =============================================================
-// CEK RFID KE API
-// =============================================================
-
-RFIDCheckResult checkRFID(
-  const String &uid,
-  String &resultName,
-  String &resultSex,
-  int &resultAgeMonth
-)
-{
-  resultName = "";
-  resultSex = "";
-  resultAgeMonth = 0;
-
-  JsonDocument request;
-  JsonDocument response;
-  request["uid"] = uid;
-  int code = apiPost("rfid/lookup", request, response);
-  if (code <= 0) return RFID_API_ERROR;
-
-  String status = response["status"] | "error";
-  if (status == "captured") {
-    String capturedFor = response["mode"] | "";
-    bool alreadyRegistered = response["registered"] | false;
-    if (capturedFor == "register" && alreadyRegistered)
-      return RFID_CAPTURED_REGISTERED;
-    return RFID_CAPTURED;
-  }
-  if (status == "registered") {
-    resultName = response["child"]["name"].as<String>();
-    resultSex = response["child"]["sex"].as<String>();
-    resultAgeMonth = response["child"]["age_days"].as<int>() / 30;
-    return RFID_REGISTERED;
-  }
-  if (status == "unknown") return RFID_UNKNOWN;
-  if (status == "ineligible" || status == "inactive") return RFID_INELIGIBLE;
-  return RFID_API_ERROR;
-}
-
-// =============================================================
-// TAMPILKAN DATA ANAK
-// =============================================================
-
-void showChildData()
-{
-  lcdClear();
-
-  lcdPrintLine(0, "DATA DITEMUKAN");
-
-  String nameLine = childName;
-
-  if (nameLine.length() > 20)
-    nameLine = nameLine.substring(0, 20);
-
-  lcdPrintLine(1, nameLine);
-
-  String info =
-    childSex + " | " +
-    String(childAgeMonth) +
-    " bulan";
-
-  lcdPrintLine(2, info);
-
-  lcdPrintLine(3, "Menyiapkan alat...");
-
-  delay(2500);
-}
-
-// =============================================================
-// RESET BUFFER TINGGI
-// =============================================================
-
-void resetHeightBuffer()
-{
-  for (int i = 0; i < HEIGHT_SAMPLE_COUNT; i++)
-  {
-    heightSamples[i] = 0;
-  }
-
-  heightSampleIndex = 0;
-
-  previousHeight = 0;
-  stableHeight = 0;
-
-  heightStable = false;
-
-  stableHeightStart = 0;
-}
-
-// =============================================================
-// HITUNG MEDIAN
-// =============================================================
-
-float calculateMedian(float values[], int count)
-{
-  float temp[HEIGHT_SAMPLE_COUNT];
-
-  for (int i = 0; i < count; i++)
-  {
-    temp[i] = values[i];
-  }
-
-  for (int i = 0; i < count - 1; i++)
-  {
-    for (int j = i + 1; j < count; j++)
-    {
-      if (temp[j] < temp[i])
-      {
-        float t = temp[i];
-        temp[i] = temp[j];
-        temp[j] = t;
-      }
-    }
-  }
-
-  if (count % 2 == 1)
-    return temp[count / 2];
-
-  return (temp[count / 2 - 1] + temp[count / 2]) / 2.0;
-}
-
-// =============================================================
-// BACA TINGGI
-// =============================================================
-
-float readHeight()
-{
-  uint16_t distance = tof.read();
-
-  if (tof.timeoutOccurred())
-  {
-    return -1;
-  }
-
-  // Jarak sensor ke kepala
-  float distanceCM = distance / 10.0;
-
-  // Tinggi badan = posisi sensor - jarak
-  float heightCM =
-    SENSOR_HEIGHT_CM - distanceCM;
-
-  if (
-    heightCM < MIN_HEIGHT_CM ||
-    heightCM > MAX_HEIGHT_CM
-  )
-  {
-    return -1;
-  }
-
-  return heightCM;
-}
-
-// =============================================================
-// FILTER TINGGI
-// =============================================================
-
-float getFilteredHeight()
-{
-  float h = readHeight();
-
-  if (h <= 0)
-    return -1;
-
-  heightSamples[heightSampleIndex] = h;
-
-  heightSampleIndex++;
-
-  if (heightSampleIndex >= HEIGHT_SAMPLE_COUNT)
-    heightSampleIndex = 0;
-
-  int validCount = 0;
-
-  float temp[HEIGHT_SAMPLE_COUNT];
-
-  for (int i = 0; i < HEIGHT_SAMPLE_COUNT; i++)
-  {
-    if (heightSamples[i] > 0)
-    {
-      temp[validCount] = heightSamples[i];
-      validCount++;
-    }
-  }
-
-  if (validCount < 3)
-    return h;
-
-  return calculateMedian(temp, validCount);
-}
-
-// =============================================================
-// BACA BERAT
-// =============================================================
-
-float readWeight()
-{
-  if (!scale.is_ready())
-    return -1;
-
-  float weight = scale.get_units(5);
-
-  // Hilangkan nilai negatif kecil
-  if (weight < 0 && weight > -0.20)
-    weight = 0;
-
-  if (weight < 0)
-    weight = 0;
-
-  // Resolusi 0.05 kg
-  weight =
-    round(weight / 0.05) * 0.05;
-
-  // Zero kecil
-  if (weight < 0.10)
-    weight = 0.00;
-
-  return weight;
-}
-
-// =============================================================
-// TAMPILKAN BERAT
-// =============================================================
-
-void showWeight(float weight)
-{
-  lcdPrintLine(
-    1,
-    "Berat: " +
-    String(weight, 2) +
-    " kg"
-  );
-
-  lcdPrintLine(
-    2,
-    "Menunggu stabil..."
-  );
-}
-
-// =============================================================
-// PROSES BERAT
-// =============================================================
-
-bool processWeight()
-{
-  float weight = readWeight();
-
-  if (weight < 0)
-    return false;
-
-  showWeight(weight);
-
-  // Anak belum naik
-  if (weight < MIN_WEIGHT)
-  {
-    stableWeightStart = 0;
-    weightStable = false;
-
-    previousWeight = weight;
-
-    return false;
-  }
-
-  // Perbedaan dengan pembacaan sebelumnya
-  float difference =
-    abs(weight - previousWeight);
-
-  previousWeight = weight;
-
-  if (difference <= STABLE_TOLERANCE)
-  {
-    if (stableWeightStart == 0)
-    {
-      stableWeightStart = millis();
-    }
-
-    if (
-      millis() - stableWeightStart >=
-      STABLE_TIME
-    )
-    {
-      stableWeight = weight;
-      weightStable = true;
-
-      return true;
-    }
-  }
-  else
-  {
-    stableWeightStart = millis();
-  }
-
-  return false;
-}
-
-// =============================================================
-// TAMPILKAN WEIGHT LOCK
-// =============================================================
-
-void showWeightLock()
-{
-  lcdClear();
-
-  lcdPrintLine(0, "BERAT TERKUNCI");
-
-  lcdPrintLine(
-    1,
-    "Berat: " +
-    String(stableWeight, 2) +
-    " kg"
-  );
-
-  lcdPrintLine(2, "Silakan berdiri");
-  lcdPrintLine(3, "Mengukur tinggi...");
-
-  beepWeightLocked();
-}
-
-// =============================================================
-// PROSES TINGGI
-// =============================================================
-
-bool processHeight()
-{
-  float height = getFilteredHeight();
-
-  if (height <= 0)
-  {
-    stableHeightStart = 0;
-
-    lcdPrintLine(1, "Tinggi: --.-- cm");
-    lcdPrintLine(2, "Posisi tidak sesuai");
-
-    return false;
-  }
-
-  // PENTING:
-  // height TIDAK dibulatkan.
-  // Nilai asli ini akan dipakai untuk Z-Score.
-
-  Serial.print("Tinggi presisi: ");
-  Serial.print(height, 2);
-  Serial.println(" cm");
-
-  lcdPrintLine(
-    1,
-    "Tinggi: " +
-    String(height, 2) +
-    " cm"
-  );
-
-  lcdPrintLine(
-    2,
-    "Menunggu stabil..."
-  );
-
-  if (previousHeight == 0)
-  {
-    previousHeight = height;
-    stableHeightStart = millis();
-
-    return false;
-  }
-
-  float difference =
-    abs(height - previousHeight);
-
-  previousHeight = height;
-
-  if (difference <= HEIGHT_STABLE_TOLERANCE)
-  {
-    if (stableHeightStart == 0)
-      stableHeightStart = millis();
-
-    if (
-      millis() - stableHeightStart >=
-      HEIGHT_STABLE_TIME
-    )
-    {
-      stableHeight = height;
-      heightStable = true;
-
-      return true;
-    }
-  }
-  else
-  {
-    stableHeightStart = millis();
-  }
-
-  return false;
-}
-
-// =============================================================
-// KIRIM HASIL PEMERIKSAAN KE API
-// =============================================================
-
-bool submitMeasurement(String uid, float weight, float height, String requestId)
-{
-  JsonDocument request;
-  JsonDocument response;
-  request["request_id"] = requestId;
-  request["uid"] = uid;
-  request["weight_kg"] = serialized(String(weight, 2));
-  request["height_cm"] = serialized(String(height, 2));
-  int code = apiPost("measurements", request, response);
-  if (code != 200 || String(response["status"] | "") != "success") return false;
-  finalZScore = response["z_score"].as<float>();
-  finalCategory = response["category"].as<String>();
-  return true;
-}
-
-void savePendingMeasurement(String uid, float weight, float height, String requestId)
-{
-  pendingMeasurement = true;
-  pendingUid = uid;
-  pendingWeight = weight;
-  pendingHeight = height;
-  pendingRequestId = requestId;
-  preferences.putBool("pending", true);
-  preferences.putString("pending_uid", uid);
-  preferences.putString("pending_req", requestId);
-  preferences.putFloat("pending_w", weight);
-  preferences.putFloat("pending_h", height);
-}
-
-void clearPendingMeasurement()
-{
-  pendingMeasurement = false;
-  preferences.remove("pending");
-  preferences.remove("pending_uid");
-  preferences.remove("pending_req");
-  preferences.remove("pending_w");
-  preferences.remove("pending_h");
-}
-
-bool sendMeasurement()
-{
-  String requestId = deviceId + "-" + String(millis(), HEX) + "-" + String(esp_random(), HEX);
-  if (submitMeasurement(currentUID, stableWeight, stableHeight, requestId)) return true;
-  savePendingMeasurement(currentUID, stableWeight, stableHeight, requestId);
-  return false;
-}
-
-// =============================================================
-// HASIL Z-SCORE
-// =============================================================
-
-void showZScoreResult()
-{
-  lcdClear();
-
-  lcdPrintLine(0, "HASIL TB/U");
-
-  lcdPrintLine(
-    1,
-    "Z-Score: " +
-    String(finalZScore, 2) +
-    " SD"
-  );
-
-  lcdPrintLine(
-    2,
-    "Kategori:"
-  );
-
-  lcdPrintLine(
-    3,
-    finalCategory
-  );
-
-  // Hasil Z-Score tetap ditampilkan
-  delay(5000);
-}
-
-// =============================================================
-// HASIL KESELURUHAN
-// =============================================================
-
-void showAllResultPage1()
-{
-  lcdClear();
-
-  lcdPrintLine(
-    0,
-    "HASIL PEMERIKSAAN"
-  );
-
-  lcdPrintLine(
-    1,
-    "Berat : " +
-    String(stableWeight, 2) +
-    " kg"
-  );
-
-  lcdPrintLine(
-    2,
-    "Tinggi: " +
-    String(stableHeight, 2) +
-    " cm"
-  );
-
-  lcdPrintLine(
-    3,
-    "Z     : " +
-    String(finalZScore, 2) +
-    " SD"
-  );
-
-  delay(5000);
-}
-
-void showAllResultPage2()
-{
-  lcdClear();
-
-  lcdPrintLine(
-    0,
-    "HASIL TB/U"
-  );
-
-  lcdPrintLine(
-    1,
-    "Z-Score: " +
-    String(finalZScore, 2) +
-    " SD"
-  );
-
-  lcdPrintLine(
-    2,
-    "Kategori:"
-  );
-
-  lcdPrintLine(
-    3,
-    finalCategory
-  );
-
-  delay(5000);
-}
-
-// =============================================================
-// PEMERIKSAAN SELESAI
-// =============================================================
-
-void showFinish()
-{
-  lcdClear();
-
-  lcdPrintLine(0, "PEMERIKSAAN");
-  lcdPrintLine(1, "SELESAI");
-  lcdPrintLine(2, "");
-  lcdPrintLine(3, "Silakan turun...");
-
-  beepResultReady();
-
-  // Jangan langsung kembali standby.
-  // Sistem menunggu anak turun dari timbangan.
-}
-
-// =============================================================
-// CEK ANAK SUDAH TURUN
-// =============================================================
-
-bool isWeightEmpty()
-{
-  float weight = readWeight();
-
-  if (weight < 0)
-    return false;
-
-  return weight < MIN_WEIGHT;
-}
-
-// =============================================================
-// STANDBY LCD
-// =============================================================
-
-void showCaptureRequest()
-{
-  lcdClear();
-
-  if (captureMode == "register") {
-    lcdPrintLine(0, "MODE PENDAFTARAN");
-    lcdPrintLine(1, "Tempelkan kartu");
-    lcdPrintLine(2, "balita yang akan");
-    lcdPrintLine(3, "didaftarkan di web");
-  } else {
-    lcdPrintLine(0, "PILIH BALITA");
-    lcdPrintLine(1, "Tempelkan kartu");
-    lcdPrintLine(2, "untuk pemeriksaan");
-    lcdPrintLine(3, "(permintaan web)");
-  }
-}
 
 void showStandby()
 {
-  if (captureMode != "off") {
-    showCaptureRequest();
-    return;
-  }
-
-  lcdClear();
-
-  lcdPrintLine(0, "SISTEM IoT");
-  lcdPrintLine(1, "DETEKSI STUNTING");
-  lcdPrintLine(2, "Tempelkan RFID");
-  lcdPrintLine(3, "");
+  lcdShow("SISTEM IoT", "DETEKSI STUNTING", "Tempelkan RFID");
 }
 
-// Tanya server apakah website sedang meminta kartu. Hanya dipanggil saat
-// STANDBY dan tidak ada kartu di reader. Bila gagal, jeda diperpanjang agar
-// pembacaan RFID tidak tersendat oleh koneksi yang buruk.
-void pollCaptureMode()
+// Pekerjaan jaringan saat standby: hanya heartbeat tiap 30 detik. Mode tangkap
+// kartu dari website ("Tempel RFID") tidak perlu ditanyakan terus-menerus:
+// web sudah menjawab "captured" saat kartu dicek, jadi alat tetap cepat.
+void idleNetwork()
 {
-  if (millis() - lastModePollAt < modePollInterval) return;
-  lastModePollAt = millis();
-  if (WiFi.status() != WL_CONNECTED || deviceToken.length() < 32) return;
-
-  JsonDocument request;
-  JsonDocument response;
-  request["ping"] = 1; // body harus objek JSON; dokumen kosong terkirim sebagai "null"
-  int code = apiPost("mode", request, response);
-  if (code != 200) {
-    modePollInterval = 5000;
-    return;
-  }
-  modePollInterval = 1000;
-
-  String newMode = response["mode"] | "off";
-  if (newMode != "register" && newMode != "select") newMode = "off";
-  if (newMode != captureMode) {
-    captureMode = newMode;
-    Serial.println("Mode tangkap kartu: " + captureMode);
-    showStandby();
-  }
-}
-
-// Kartu berhasil dikirim ke website (mode tangkap).
-void showCaptureDone()
-{
-  lcdClear();
-
-  lcdPrintLine(0, "KARTU TERBACA");
-  lcdPrintLine(1, currentUID);
-  lcdPrintLine(2, "Dikirim ke website");
-  lcdPrintLine(3, "Lanjutkan di web");
-
-  beepSuccess();
-  delay(1200);
-}
-
-void showCaptureAlreadyRegistered()
-{
-  lcdClear();
-  lcdPrintLine(0, "KARTU SUDAH");
-  lcdPrintLine(1, "TERDAFTAR");
-  lcdPrintLine(2, currentUID);
-  lcdPrintLine(3, "Pilih kartu lain");
-
-  beepAlreadyRegistered();
-  delay(3000);
-}
-
-// FIX: non-blocking - dipanggil langsung oleh task RFID sebelum antrean
-// disentuh task upload. Tidak ada HTTP dan tidak ada delay di fungsi ini.
-void showCardDetected(const String &uid)
-{
-  lcdPrintLine(0, "KARTU TERBACA");
-  lcdPrintLine(1, uid);
-  lcdPrintLine(2, "Masuk antrean");
-  lcdPrintLine(3, "");
-}
-
-// =============================================================
-// RFID BELUM TERDAFTAR
-// =============================================================
-
-void showUnknownRFID()
-{
-  lcdClear();
-
-  lcdPrintLine(0, "RFID TERDETEKSI");
-
-  lcdPrintLine(
-    1,
-    "UID:"
-  );
-
-  lcdPrintLine(
-    2,
-    currentUID
-  );
-
-  lcdPrintLine(
-    3,
-    "Belum Terdaftar"
-  );
-
-  beepError();
-
-  delay(1500);
-
-  lcdClear();
-
-  lcdPrintLine(0, "KARTU BELUM");
-  lcdPrintLine(1, "TERDAFTAR");
-  lcdPrintLine(2, "Buka Website");
-  lcdPrintLine(3, "Menu Pendaftaran");
-
-  delay(1800);
-}
-
-// =============================================================
-// RFID TERDAFTAR
-// =============================================================
-
-void showRegisteredRFID()
-{
-  lcdClear();
-
-  lcdPrintLine(
-    0,
-    "RFID TERDETEKSI"
-  );
-
-  lcdPrintLine(
-    1,
-    childName
-  );
-
-  lcdPrintLine(
-    2,
-    "Umur: " +
-    String(childAgeMonth) +
-    " bulan"
-  );
-
-  lcdPrintLine(
-    3,
-    "Data ditemukan"
-  );
-
-  beepSuccess();
-
-  delay(1200);
-}
-
-// =============================================================
-// INISIALISASI TOF
-// =============================================================
-
-bool initToF()
-{
-  Wire.begin(TOF_SDA, TOF_SCL);
-
-  tof.setTimeout(500);
-
-  if (!tof.init())
+  if (WiFi.status() != WL_CONNECTED)
   {
-    tofReady = false;
-    Serial.println("VL53L1X gagal");
-
-    return false;
+    kickWiFiReconnect();
+    return;
   }
 
-  // Mode jarak panjang
-  tof.setDistanceMode(
-    VL53L1X::Long
-  );
+  if (lastHeartbeatAt == 0 || millis() - lastHeartbeatAt >= HEARTBEAT_INTERVAL)
+  {
+    lastHeartbeatAt = millis();
+    sendHeartbeat();
 
-  // 50 ms
-  tof.setMeasurementTimingBudget(
-    50000
-  );
-
-  tof.startContinuous(50);
-
-  Serial.println("VL53L1X siap");
-
-  tofReady = true;
-
-  return true;
+    // Token ditolak berulang kali: buka portal untuk mengisi token baru.
+    if (authFailures >= 3)
+    {
+      authFailures = 0;
+      secureClient.stop();
+      connectWiFi(true);
+      showStandby();
+    }
+  }
 }
 
 // =============================================================
-// INISIALISASI HX711
+// RFID
 // =============================================================
 
-void initHX711()
+bool isRfidVersionValid(byte v)
 {
-  scale.begin(
-    HX711_DT,
-    HX711_SCK
-  );
-
-  scale.set_scale(
-    CALIBRATION_FACTOR
-  );
-
-  Serial.println(
-    "HX711 siap"
-  );
-
-  Serial.print(
-    "Calibration Factor: "
-  );
-
-  Serial.println(
-    CALIBRATION_FACTOR
-  );
-
-  // Tare
-  lcdClear();
-
-  lcdPrintLine(
-    0,
-    "INISIALISASI"
-  );
-
-  lcdPrintLine(
-    1,
-    "Tare timbangan..."
-  );
-
-  delay(1000);
-
-  scale.tare(20);
-
-  Serial.println(
-    "Tare selesai"
-  );
-
-  scaleReady = scale.is_ready();
-
-  delay(1000);
-}
-
-// =============================================================
-// INISIALISASI DAN PEMULIHAN RFID RC522
-// =============================================================
-
-bool isRFIDVersionValid(byte version)
-{
-  return version == 0x12 || // chip counterfeit yang umum
-         version == 0x82 || // clone RC522 pada alat ini (teruji membaca UID)
-         version == 0x88 || // clone FM17522
-         version == 0x90 || // MFRC522 v0.0
-         version == 0x91 || // MFRC522 v1.0
-         version == 0x92;   // MFRC522 v2.0
+  // 0x12/0x82/0x88 = clone RC522 yang umum, 0x90-0x92 = MFRC522 asli
+  return v == 0x12 || v == 0x82 || v == 0x88 || v == 0x90 || v == 0x91 || v == 0x92;
 }
 
 bool initRFID()
 {
-  // Pastikan chip-select tidak aktif ketika bus SPI mulai. Beberapa modul
-  // RC522 tidak merespons setelah boot bila SS/RST sempat mengambang.
+  // Pastikan SS tidak aktif dan modul di-reset sebelum SPI dimulai.
   pinMode(RFID_SS, OUTPUT);
   digitalWrite(RFID_SS, HIGH);
   pinMode(RFID_RST, OUTPUT);
@@ -1777,780 +535,490 @@ bool initRFID()
   digitalWrite(RFID_RST, HIGH);
   delay(100);
 
-  SPI.begin(
-    RFID_SCK,
-    RFID_MISO,
-    RFID_MOSI,
-    RFID_SS
-  );
-
-  // FIX: non-blocking - library MFRC522 memakai SPI 4 MHz secara default.
-  // Catat di Serial agar konfigurasi kecepatan mudah diverifikasi saat boot.
-  Serial.println("RFID SPI: 4 MHz");
-
+  SPI.begin(RFID_SCK, RFID_MISO, RFID_MOSI, RFID_SS);
   rfid.PCD_Init();
   delay(50);
 
   byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
   Serial.printf("RFID RC522 VersionReg: 0x%02X\n", version);
-
-  // Hanya nilai versi RC522 yang dikenal boleh dianggap siap. Nilai acak
-  // seperti 0xFE juga menandakan MISO/SS mengambang atau komunikasi gagal.
-  if (!isRFIDVersionValid(version))
+  if (!isRfidVersionValid(version))
   {
-    rfidReady = false;
     Serial.println("RFID RC522 tidak terdeteksi - periksa 3.3V dan kabel SPI");
     return false;
   }
 
-  // Maksimalkan sensitivitas agar kartu lebih mudah terbaca pada casing alat.
-  rfid.PCD_SetAntennaGain(MFRC522::RxGain_max);
+  rfid.PCD_SetAntennaGain(MFRC522::RxGain_max); // lebih mudah membaca lewat casing
   rfid.PCD_AntennaOn();
-  lastRFIDHealthCheckAt = millis();
-  rfidReady = true;
-
-  Serial.println("RFID RC522 siap");
   return true;
 }
 
-void recoverRFIDIfNeeded()
+// Inisialisasi ulang bila komunikasi dengan modul RC522 terputus.
+void checkRFIDHealth()
 {
-  if (millis() - lastRFIDHealthCheckAt < RFID_HEALTH_CHECK_INTERVAL)
-    return;
+  if (millis() - lastRfidCheckAt < 5000) return;
+  lastRfidCheckAt = millis();
 
-  lastRFIDHealthCheckAt = millis();
-  byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
-  if (!isRFIDVersionValid(version))
+  if (isRfidVersionValid(rfid.PCD_ReadRegister(MFRC522::VersionReg)))
+    rfidReady = true;
+  else
   {
-    Serial.println("Komunikasi RFID terputus, mencoba inisialisasi ulang...");
+    Serial.println("Komunikasi RFID terputus, inisialisasi ulang");
     rfidReady = initRFID();
+  }
+}
+
+// WUPA membangunkan kartu yang sedang HALT: ada jawaban berarti kartu masih menempel.
+bool cardStillPresent()
+{
+  byte atqa[2];
+  byte size = sizeof(atqa);
+  auto status = rfid.PICC_WakeupA(atqa, &size);
+  if (status != MFRC522::STATUS_OK && status != MFRC522::STATUS_COLLISION) return false;
+  rfid.PICC_HaltA();
+  return true;
+}
+
+// Mengembalikan UID kartu yang baru ditempel, atau "" bila tidak ada.
+String readCard()
+{
+  if (!rfidReady) return "";
+
+  // Kartu dari pemeriksaan sebelumnya harus dilepas dulu (mencegah hitung ganda).
+  if (cardMustLeave)
+  {
+    if (cardStillPresent()) cardSeenAt = millis();
+    else if (millis() - cardSeenAt > 800) cardMustLeave = false;
+    delay(50);
+    return "";
+  }
+
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return "";
+
+  String uid = "";
+  for (byte i = 0; i < rfid.uid.size; i++)
+  {
+    if (i > 0) uid += ":";
+    if (rfid.uid.uidByte[i] < 0x10) uid += "0";
+    uid += String(rfid.uid.uidByte[i], HEX);
+  }
+  uid.toUpperCase();
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+  return uid;
+}
+
+// =============================================================
+// BERAT (HX711)
+// =============================================================
+
+// Berat TIDAK dibulatkan. Noise di bawah 0.10 kg dianggap nol agar timbangan
+// kosong terdeteksi. Mengembalikan -1 bila HX711 belum siap.
+float readWeight()
+{
+  if (!scale.is_ready()) return -1;
+
+  float weight = scale.get_units(5);
+  if (weight < 0.10) weight = 0;
+  return weight;
+}
+
+// Tunggu berat stabil. Mengembalikan berat terkunci, atau -1 bila waktu habis.
+float waitStableWeight()
+{
+  float previous = 0;
+  unsigned long stableSince = 0;
+  unsigned long started = millis();
+
+  while (millis() - started < WEIGHT_TIMEOUT)
+  {
+    float weight = readWeight();
+    if (weight < 0)
+    {
+      delay(1);
+      continue;
+    }
+
+    lcdLine(1, "Berat: " + String(weight, 2) + " kg");
+    lcdLine(2, "Tunggu stabil...");
+
+    if (weight < MIN_WEIGHT) // belum ada yang naik
+    {
+      stableSince = 0;
+    }
+    else if (fabs(weight - previous) <= STABLE_TOLERANCE)
+    {
+      if (stableSince == 0) stableSince = millis();
+      if (millis() - stableSince >= STABLE_TIME) return weight;
+    }
+    else
+    {
+      stableSince = millis();
+    }
+    previous = weight;
+  }
+  return -1;
+}
+
+// =============================================================
+// TINGGI (VL53L1X)
+// =============================================================
+
+// Tinggi = tinggi sensor dari lantai - jarak ke kepala. Mengembalikan -1 bila
+// pembacaan tidak valid atau di luar rentang.
+float readHeight()
+{
+  uint16_t mm = tof.read();
+  if (tof.timeoutOccurred()) return -1;
+
+  // Data mentah sensor, untuk memeriksa akurasi tinggi (lihat Serial Monitor).
+  Serial.printf("TOF jarak=%u mm status=%d sinyal=%.1f ambient=%.1f\n", mm,
+                (int)tof.ranging_data.range_status,
+                tof.ranging_data.peak_signal_count_rate_MCPS,
+                tof.ranging_data.ambient_count_rate_MCPS);
+
+  float height = SENSOR_HEIGHT_CM - mm / 10.0f;
+  if (height < MIN_HEIGHT_CM || height > MAX_HEIGHT_CM) return -1;
+  return height;
+}
+
+float medianOf(float* values, int count)
+{
+  float sorted[HEIGHT_SAMPLES];
+  for (int i = 0; i < count; i++) sorted[i] = values[i];
+  std::sort(sorted, sorted + count);
+  if (count % 2 == 1) return sorted[count / 2];
+  return (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0f;
+}
+
+// Tunggu tinggi stabil. Mengembalikan tinggi terkunci, atau -1 bila waktu habis.
+float waitStableHeight()
+{
+  float samples[HEIGHT_SAMPLES];
+  int count = 0, next = 0;
+  float previous = 0;
+  unsigned long stableSince = 0;
+  unsigned long started = millis();
+
+  while (millis() - started < HEIGHT_TIMEOUT)
+  {
+    float raw = readHeight();
+    if (raw <= 0)
+    {
+      previous = 0;
+      lcdLine(1, "Tinggi: --.-- cm");
+      lcdLine(2, "Posisi tidak sesuai");
+      continue;
+    }
+
+    samples[next] = raw;
+    next = (next + 1) % HEIGHT_SAMPLES;
+    if (count < HEIGHT_SAMPLES) count++;
+    float height = count < 3 ? raw : medianOf(samples, count);
+
+    lcdLine(1, "Tinggi: " + String(height, 2) + " cm");
+    lcdLine(2, "Tunggu stabil...");
+
+    if (previous == 0)
+    {
+      stableSince = millis();
+    }
+    else if (fabs(height - previous) <= HEIGHT_STABLE_TOLERANCE)
+    {
+      if (millis() - stableSince >= HEIGHT_STABLE_TIME) return height;
+    }
+    else
+    {
+      stableSince = millis();
+    }
+    previous = height;
+  }
+  return -1;
+}
+
+// =============================================================
+// PEMERIKSAAN TERTUNDA (NVS)
+// =============================================================
+
+void savePending(const String& uid, float weight, float height, const String& requestId)
+{
+  hasPending = true;
+  pendingUid = uid;
+  pendingWeight = weight;
+  pendingHeight = height;
+  pendingRequest = requestId;
+  prefs.putBool("pending", true);
+  prefs.putString("pending_uid", uid);
+  prefs.putString("pending_req", requestId);
+  prefs.putFloat("pending_w", weight);
+  prefs.putFloat("pending_h", height);
+}
+
+void clearPending()
+{
+  hasPending = false;
+  prefs.remove("pending");
+  prefs.remove("pending_uid");
+  prefs.remove("pending_req");
+  prefs.remove("pending_w");
+  prefs.remove("pending_h");
+}
+
+// Alat tidak menerima pengukuran baru sebelum data tertunda terkirim.
+void retryPending()
+{
+  if (lastPendingTryAt != 0 && millis() - lastPendingTryAt < 5000) return;
+  lastPendingTryAt = millis();
+
+  lcdShow("DATA BELUM TERKIRIM", "Menunggu internet...", pendingUid, "Jangan ukur dahulu");
+
+  SubmitResult result = submitMeasurement(pendingUid, pendingWeight, pendingHeight, pendingRequest);
+
+  if (result == SUBMIT_OK)
+  {
+    clearPending();
+    lcdShow("DATA TERSINKRON", "Z: " + String(resultZ, 2), resultCategory);
+    delay(3000);
+    showStandby();
+  }
+  else if (result == SUBMIT_REJECTED)
+  {
+    clearPending(); // ditolak web: jangan menahan alat selamanya
+    lcdShow("DATA DITOLAK WEB", rejectReason.substring(0, 20), rejectReason.substring(20, 40), rejectReason.substring(40, 60));
+    PLAY(TUNE_ERROR);
+    delay(4000);
+    showStandby();
+  }
+}
+
+// =============================================================
+// PEMERIKSAAN
+// =============================================================
+
+// Semua hasil tampil sekaligus: berat, tinggi, Z-Score, dan status.
+void showResults(float weight, float height)
+{
+  lcdShow("Berat : " + String(weight, 2) + " kg",
+          "Tinggi: " + String(height, 2) + " cm",
+          "Z-Score: " + String(resultZ, 2) + " SD",
+          resultCategory);
+}
+
+String sexText()
+{
+  if (childSex == "L") return "Laki-laki";
+  if (childSex == "P") return "Perempuan";
+  return childSex;
+}
+
+// Satu pemeriksaan lengkap untuk satu kartu. Kembali ke standby setelah selesai.
+void examine(const String& uid)
+{
+  // 1. Respons lokal PERTAMA: bunyi dan layar, sebelum menghubungi web.
+  PLAY(TUNE_CARD);
+  lcdShow("KARTU TERBACA", uid, "Mengambil data", "balita...");
+
+  // 2. Cek kartu ke web.
+  unsigned long lookupStarted = millis();
+  LookupResult found = lookupCard(uid);
+  Serial.printf("Kartu %s: cek web %lu ms, hasil %d\n", uid.c_str(), millis() - lookupStarted, (int)found);
+
+  if (found == LOOKUP_CAPTURED)
+  {
+    // Website meminta kartu (daftar/pilih balita): UID sudah terkirim, tidak menimbang.
+    lcdShow("KARTU TERBACA", uid, "Dikirim ke website", "Lanjutkan di web");
+    PLAY(TUNE_OK);
+    delay(1200);
+    return;
+  }
+  if (found == LOOKUP_CAPTURED_REGISTERED)
+  {
+    lcdShow("KARTU SUDAH", "TERDAFTAR", uid, "Pilih kartu lain");
+    PLAY(TUNE_WARN);
+    delay(3000);
+    return;
+  }
+  if (found == LOOKUP_UNKNOWN)
+  {
+    lcdShow("RFID BELUM TERDAFTAR", uid, "Buka Website, menu", "Data Balita");
+    PLAY(TUNE_ERROR);
+    delay(2500);
+    return;
+  }
+  if (found == LOOKUP_INELIGIBLE)
+  {
+    lcdShow("TIDAK DAPAT DIUKUR", "Usia harus 24-60", "bulan/data nonaktif");
+    PLAY(TUNE_ERROR);
+    delay(3000);
+    return;
+  }
+  // LOOKUP_REGISTERED, atau web tidak terjangkau: tetap ukur; web memeriksa
+  // kartu saat hasil dikirim (jika gagal kirim, data disimpan di NVS).
+
+  // 3. Data balita tampil lebih dulu: nama, jenis kelamin, umur. Baru menimbang.
+  if (found == LOOKUP_REGISTERED)
+    lcdShow("DATA DITEMUKAN", childName, sexText() + " | " + String(childAgeMonth) + " bulan", "Menyiapkan timbangan");
+  PLAY(TUNE_READY); // alat siap mengukur: 1 bunyi panjang
+  if (found == LOOKUP_REGISTERED)
+    delay(1000);
+
+  // Layar timbang hanya berisi perintah (tanpa nama/umur).
+  lcdShow("SILAKAN NAIK", "Berat: --.-- kg", "Tunggu stabil...", "Jangan bergerak");
+
+  float weight = waitStableWeight();
+  if (weight < 0)
+  {
+    lcdShow("WAKTU HABIS", "Tidak ada yang naik", "timbangan");
+    PLAY(TUNE_ERROR);
+    delay(2500);
+    return;
+  }
+
+  // 4. Tinggi.
+  lcdShow("PENGUKURAN TINGGI", "Tinggi: --.-- cm", "Tunggu stabil...", "Berdiri tegak, diam");
+  delay(500);
+
+  float height = waitStableHeight();
+  if (height < 0)
+  {
+    lcdShow("WAKTU HABIS", "Tinggi tidak stabil", "Ulangi pemeriksaan");
+    PLAY(TUNE_ERROR);
+    delay(2500);
+    return;
+  }
+  Serial.printf("TINGGI TERKUNCI: %.2f cm | BERAT: %.2f kg\n", height, weight);
+
+  // 5. Kirim ke web.
+  lcdShow("TINGGI TERKUNCI", "Tinggi: " + String(height, 2) + " cm", "Menghitung TB/U", "Mohon tunggu...");
+
+  String requestId = String(DEVICE_ID) + "-" + String(millis(), HEX) + "-" + String(esp_random(), HEX);
+  SubmitResult sent = submitMeasurement(uid, weight, height, requestId);
+
+  if (sent == SUBMIT_OK)
+  {
+    showResults(weight, height); // semua hasil tampil
+
+    // Hasil tampil RESULT_HOLD_MS, lalu minta turun. Kembali ke standby setelah
+    // timbangan kosong (maks. 60 detik).
+    delay(RESULT_HOLD_MS);
+    lcdShow("PEMERIKSAAN SELESAI", "", "Silakan turun", "dari timbangan");
+    PLAY(TUNE_DONE); // bunyi selesai
+    unsigned long askedAt = millis();
+    while (millis() - askedAt < 60000)
+    {
+      float now = readWeight();
+      if (now >= 0 && now < MIN_WEIGHT) break;
+    }
+  }
+  else if (sent == SUBMIT_REJECTED)
+  {
+    lcdShow("DATA DITOLAK WEB", rejectReason.substring(0, 20), rejectReason.substring(20, 40), rejectReason.substring(40, 60));
+    PLAY(TUNE_ERROR);
+    Serial.println("Data ditolak web: " + rejectReason);
+    delay(4000);
   }
   else
   {
-    rfidReady = true;
-  }
-}
-
-bool isLCDReady()
-{
-  I2C_LCD.beginTransmission(LCD_ADDRESS);
-  return I2C_LCD.endTransmission() == 0;
-}
-
-// =============================================================
-// FIX: non-blocking - RING BUFFER RFID DAN TASK FREERTOS
-// =============================================================
-
-bool enqueueRFID(const String &uid, unsigned long timestamp)
-{
-  if (!rfidQueueMutex || xSemaphoreTake(rfidQueueMutex, pdMS_TO_TICKS(20)) != pdTRUE)
-    return false;
-
-  if (rfidQueueCount >= RFID_QUEUE_CAPACITY) {
-    xSemaphoreGive(rfidQueueMutex);
-    Serial.println("RFID queue penuh, kartu tidak dimasukkan");
-    return false;
-  }
-
-  rfidUploadQueue[rfidQueueTail].uid = uid;
-  rfidUploadQueue[rfidQueueTail].timestamp = timestamp;
-  rfidQueueTail = (rfidQueueTail + 1) % RFID_QUEUE_CAPACITY;
-  rfidQueueCount++;
-  uint8_t countNow = rfidQueueCount;
-  xSemaphoreGive(rfidQueueMutex);
-
-  Serial.printf("RFID queue: %u/%u\n", countNow, RFID_QUEUE_CAPACITY);
-  return true;
-}
-
-bool peekRFID(QueueData &data)
-{
-  if (!rfidQueueMutex || xSemaphoreTake(rfidQueueMutex, pdMS_TO_TICKS(20)) != pdTRUE)
-    return false;
-
-  bool available = rfidQueueCount > 0;
-  if (available) data = rfidUploadQueue[rfidQueueHead];
-  xSemaphoreGive(rfidQueueMutex);
-  return available;
-}
-
-void popRFID()
-{
-  if (!rfidQueueMutex || xSemaphoreTake(rfidQueueMutex, pdMS_TO_TICKS(20)) != pdTRUE)
-    return;
-
-  if (rfidQueueCount > 0) {
-    rfidUploadQueue[rfidQueueHead].uid = "";
-    rfidQueueHead = (rfidQueueHead + 1) % RFID_QUEUE_CAPACITY;
-    rfidQueueCount--;
-  }
-  xSemaphoreGive(rfidQueueMutex);
-}
-
-void taskRFID(void *parameter)
-{
-  (void)parameter;
-  Serial.printf("taskRFID aktif di Core %d\n", xPortGetCoreID());
-
-  for (;;) {
-    if (currentState != STATE_STANDBY || pendingMeasurement) {
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
-    }
-
-    recoverRFIDIfNeeded();
-
-    if (!rfidReady) {
-      vTaskDelay(pdMS_TO_TICKS(100));
-      continue;
-    }
-
-    if (!rfid.PICC_IsNewCardPresent()) {
-      vTaskDelay(pdMS_TO_TICKS(5));
-      continue;
-    }
-
-    unsigned long detectedAt = millis();
-    if (!rfid.PICC_ReadCardSerial()) {
-      vTaskDelay(pdMS_TO_TICKS(1));
-      continue;
-    }
-
-    String uid = readRFIDUID();
-
-    // Selesaikan transaksi SPI segera; tidak ada delay setelah pembacaan.
-    rfid.PICC_HaltA();
-    rfid.PCD_StopCrypto1();
-
-    // Respons lokal selalu lebih dahulu daripada akses jaringan.
-    beepCardDetected();
-    showCardDetected(uid);
-    bool queued = enqueueRFID(uid, millis());
-
-    unsigned long responseMs = millis() - detectedAt;
-    Serial.printf("Card detected in %lu ms | UID: %s | queued: %s\n",
-                  responseMs, uid.c_str(), queued ? "yes" : "no");
-
-    // Debounce pendek dan non-blocking untuk task lain.
-    vTaskDelay(pdMS_TO_TICKS(250));
-  }
-}
-
-void taskUpload(void *parameter)
-{
-  (void)parameter;
-  Serial.printf("taskUpload aktif di Core %d\n", xPortGetCoreID());
-
-  for (;;) {
-    QueueData item;
-    if (!peekRFID(item)) {
-      vTaskDelay(pdMS_TO_TICKS(50));
-      continue;
-    }
-
-    // WiFi mati tidak boleh menahan task RFID. Coba lagi lima detik kemudian.
-    if (WiFi.status() != WL_CONNECTED) {
-      WiFi.reconnect();
-      Serial.println("Upload RFID ditunda: WiFi terputus");
-      vTaskDelay(pdMS_TO_TICKS(5000));
-      continue;
-    }
-
-    String resultName;
-    String resultSex;
-    int resultAgeMonth = 0;
-    RFIDCheckResult result = checkRFID(
-      item.uid,
-      resultName,
-      resultSex,
-      resultAgeMonth
-    );
-
-    if (result == RFID_API_ERROR) {
-      Serial.println("Upload RFID gagal, retry 5 detik");
-      vTaskDelay(pdMS_TO_TICKS(5000));
-      continue;
-    }
-
-    RFIDResultData completed = {};
-    completed.result = result;
-    completed.timestamp = item.timestamp;
-    completed.childAgeMonth = resultAgeMonth;
-    strlcpy(completed.uid, item.uid.c_str(), sizeof(completed.uid));
-    strlcpy(completed.childName, resultName.c_str(), sizeof(completed.childName));
-    strlcpy(completed.childSex, resultSex.c_str(), sizeof(completed.childSex));
-
-    // Bila state machine sedang menimbang, hasil menunggu di queue ini.
-    xQueueSend(rfidResultQueue, &completed, portMAX_DELAY);
-    popRFID();
-    Serial.printf("RFID terkirim di background | UID: %s\n", item.uid.c_str());
+    savePending(uid, weight, height, requestId);
+    lcdShow("GAGAL KIRIM DATA", "Periksa WiFi/API", "Data disimpan,", "dikirim otomatis");
+    PLAY(TUNE_ERROR);
+    delay(3000);
   }
 }
 
 // =============================================================
-// SETUP
+// SETUP DAN LOOP
 // =============================================================
 
 void setup()
 {
   Serial.begin(115200);
 
-  // FIX: non-blocking - queue dan mutex dibuat sebelum task/perangkat aktif.
-  rfidQueueMutex = xSemaphoreCreateMutex();
-  apiMutex = xSemaphoreCreateMutex();
-  rfidResultQueue = xQueueCreate(RFID_QUEUE_CAPACITY, sizeof(RFIDResultData));
-  if (!rfidQueueMutex || !apiMutex || !rfidResultQueue) {
-    Serial.println("FATAL: alokasi queue/mutex RFID gagal");
-    while (true) delay(1000);
-  }
-
-  preferences.begin("sip-stunting", false);
-  deviceToken = preferences.getString("device_token", "");
-  pendingMeasurement = preferences.getBool("pending", false);
-  if (pendingMeasurement) {
-    pendingUid = preferences.getString("pending_uid", "");
-    pendingRequestId = preferences.getString("pending_req", "");
-    pendingWeight = preferences.getFloat("pending_w", 0);
-    pendingHeight = preferences.getFloat("pending_h", 0);
+  prefs.begin("sip-stunting", false);
+  deviceToken = prefs.getString("device_token", "");
+  hasPending = prefs.getBool("pending", false);
+  if (hasPending)
+  {
+    pendingUid = prefs.getString("pending_uid", "");
+    pendingRequest = prefs.getString("pending_req", "");
+    pendingWeight = prefs.getFloat("pending_w", 0);
+    pendingHeight = prefs.getFloat("pending_h", 0);
   }
 
   delay(1000);
+  Serial.println("\n=== SISTEM IoT DETEKSI DINI STUNTING ===");
 
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println(" SISTEM IoT DETEKSI DINI STUNTING");
-  Serial.println("========================================");
-
-  // ---------------- LCD ----------------
-
-  I2C_LCD.begin(
-    LCD_SDA,
-    LCD_SCL,
-    400000
-  );
-
+  // LCD
+  I2C_LCD.begin(LCD_SDA, LCD_SCL, 400000);
   lcdBegin();
   lcdReady = isLCDReady();
+  lcdShow("SISTEM IoT", "DETEKSI STUNTING", "Inisialisasi...", "Mohon tunggu");
 
-  lcdClear();
+  // Buzzer; arus pin maksimum agar lebih keras
+  pinMode(BUZZER_PIN, OUTPUT);
+  gpio_set_drive_capability((gpio_num_t)BUZZER_PIN, GPIO_DRIVE_CAP_3);
+  digitalWrite(BUZZER_PIN, LOW);
 
-  lcdPrintLine(0, "SISTEM IoT");
-  lcdPrintLine(1, "DETEKSI STUNTING");
-  lcdPrintLine(2, "Inisialisasi...");
-  lcdPrintLine(3, "Mohon tunggu");
+  // Timbangan
+  scale.begin(HX711_DT, HX711_SCK);
+  scale.set_scale(CALIBRATION_FACTOR);
+  lcdShow("INISIALISASI", "Tare timbangan...");
+  delay(1000);
+  scale.tare(20);
+  scaleReady = scale.wait_ready_timeout(1000);
+  Serial.println(scaleReady ? "HX711 siap" : "HX711 tidak merespons");
 
-  // ---------------- BUZZER ----------------
-
-  ledcAttach(
-    BUZZER_PIN,
-    5000,
-    8
-  );
-
-  buzzerOff();
-
-  // ---------------- HX711 ----------------
-
-  initHX711();
-
-  // ---------------- TOF ----------------
-
-  if (!initToF())
+  // Sensor tinggi (wajib ada)
+  Wire.begin(TOF_SDA, TOF_SCL);
+  tof.setTimeout(500);
+  if (!tof.init())
   {
-    lcdClear();
-
-    lcdPrintLine(
-      0,
-      "ERROR VL53L1X"
-    );
-
-    lcdPrintLine(
-      1,
-      "Periksa kabel"
-    );
-
+    lcdShow("ERROR VL53L1X", "Periksa kabel");
     while (true)
     {
-      beepError();
+      PLAY(TUNE_ERROR);
       delay(2000);
     }
   }
-
-  // ---------------- RFID ----------------
+  tof.setDistanceMode(VL53L1X::Long);
+  tof.setMeasurementTimingBudget(50000);
+  tof.startContinuous(50);
+  tofReady = true;
+  Serial.println("VL53L1X siap");
 
   rfidReady = initRFID();
 
-  // FIX: non-blocking - pembaca RFID hidup di Core 1 bahkan saat koneksi
-  // WiFi/portal konfigurasi masih menunggu.
-  BaseType_t rfidTaskCreated = xTaskCreatePinnedToCore(
-    taskRFID,
-    "taskRFID",
-    6144,
-    nullptr,
-    3,
-    &taskRFIDHandle,
-    1
-  );
-  if (rfidTaskCreated != pdPASS)
-    Serial.println("FATAL: taskRFID gagal dibuat");
-
-  // ---------------- WIFI ----------------
-
   connectWiFi();
 
-  // FIX: non-blocking - semua lookup kartu/API dikerjakan Core 0 dengan
-  // prioritas lebih rendah daripada pembacaan RFID.
-  BaseType_t uploadTaskCreated = xTaskCreatePinnedToCore(
-    taskUpload,
-    "taskUpload",
-    12288,
-    nullptr,
-    1,
-    &taskUploadHandle,
-    0
-  );
-  if (uploadTaskCreated != pdPASS)
-    Serial.println("FATAL: taskUpload gagal dibuat");
-
-  // ---------------- STANDBY ----------------
-
   showStandby();
+  Serial.println("SISTEM SIAP");
 
-  Serial.println();
-  Serial.println(
-    "SISTEM SIAP"
-  );
-
+  // Bunyi pertama: alat menyala dan semua sensor siap dipakai.
   if (rfidReady && scaleReady && tofReady && lcdReady)
-    beepSuccess();
+    PLAY(TUNE_READY);
   else
-    beepError();
+    PLAY(TUNE_ERROR);
 }
-
-// =============================================================
-// LOOP
-// =============================================================
 
 void loop()
 {
-  if (millis() - lastHeartbeatAt >= 10000 || lastHeartbeatAt == 0) {
-    lastHeartbeatAt = millis();
-    scaleReady = scale.is_ready();
-    lcdReady = isLCDReady();
-    if (!pendingMeasurement) sendHeartbeat();
-  }
-
-  if (pendingMeasurement) {
-    lcdPrintLine(0, "DATA BELUM TERKIRIM");
-    lcdPrintLine(1, "Menunggu internet...");
-    lcdPrintLine(2, pendingUid);
-    lcdPrintLine(3, "Jangan ukur dahulu");
-    if (millis() - lastPendingRetryAt >= 5000 || lastPendingRetryAt == 0) {
-      lastPendingRetryAt = millis();
-      if (submitMeasurement(pendingUid, pendingWeight, pendingHeight, pendingRequestId)) {
-        clearPendingMeasurement();
-        lcdClear();
-        lcdPrintLine(0, "DATA TERSINKRON");
-        lcdPrintLine(1, "Z: " + String(finalZScore, 2));
-        lcdPrintLine(2, finalCategory);
-        delay(3000);
-        showStandby();
-      }
-    }
+  if (hasPending)
+  {
+    retryPending();
     return;
   }
 
-  // ===========================================================
-  // STANDBY
-  // ===========================================================
-
-  if (currentState == STATE_STANDBY)
+  String uid = readCard();
+  if (uid != "")
   {
-    // FIX: non-blocking - loop hanya mengambil hasil yang sudah selesai dari
-    // taskUpload. Pembacaan kartu sendiri berlangsung terus di taskRFID.
-    RFIDResultData completed;
-    if (xQueueReceive(rfidResultQueue, &completed, 0) == pdTRUE) {
-      currentUID = String(completed.uid);
-      childName = String(completed.childName);
-      childSex = String(completed.childSex);
-      childAgeMonth = completed.childAgeMonth;
-      queuedRFIDResult = completed.result;
-      currentState = STATE_CHECK_RFID;
-      return;
-    }
+    examine(uid);
 
-    // Poll web boleh lambat; task RFID berprioritas tinggi tetap bisa preempt.
-    pollCaptureMode();
-    return;
-  }
-
-  // ===========================================================
-  // CEK RFID
-  // ===========================================================
-
-  if (currentState == STATE_CHECK_RFID)
-  {
-    // FIX: non-blocking - hasil ini sudah dihitung taskUpload di Core 0.
-    RFIDCheckResult result = queuedRFIDResult;
-
-    if (result == RFID_CAPTURED_REGISTERED) {
-      showCaptureAlreadyRegistered();
-      captureMode = "off";
-      lastModePollAt = millis();
-      currentUID = "";
-      currentState = STATE_STANDBY;
-      showStandby();
-      return;
-    }
-
-    if (result == RFID_CAPTURED) {
-      // Website meminta kartu (daftar/pilih balita): UID sudah dikirim,
-      // jangan mulai penimbangan.
-      showCaptureDone();
-      captureMode = "off";
-      lastModePollAt = millis();
-      currentUID = "";
-      currentState = STATE_STANDBY;
-      showStandby();
-      return;
-    }
-    if (result == RFID_REGISTERED) {
-      currentState = STATE_REGISTERED;
-      return;
-    }
-    if (result == RFID_UNKNOWN) {
-      currentState = STATE_UNKNOWN_RFID;
-      return;
-    }
-    lcdClear();
-    if (result == RFID_INELIGIBLE) {
-      lcdPrintLine(0, "TIDAK DAPAT DIUKUR");
-      lcdPrintLine(1, "Usia harus 24-60");
-      lcdPrintLine(2, "bulan / data nonaktif");
-    } else {
-      lcdPrintLine(0, "GANGGUAN API");
-      lcdPrintLine(1, "RFID tidak diproses");
-      lcdPrintLine(2, "Coba kembali");
-    }
-    beepError();
-    delay(3000);
-    currentUID = "";
-    currentState = STATE_STANDBY;
+    cardMustLeave = true; // kartu ini tidak boleh memicu pemeriksaan lagi
+    cardSeenAt = millis();
     showStandby();
     return;
   }
 
-  // ===========================================================
-  // RFID BELUM TERDAFTAR
-  // ===========================================================
-
-  if (currentState == STATE_UNKNOWN_RFID)
-  {
-    showUnknownRFID();
-
-    currentUID = "";
-
-    currentState =
-      STATE_STANDBY;
-
-    showStandby();
-
-    return;
-  }
-
-  // ===========================================================
-  // RFID TERDAFTAR
-  // ===========================================================
-
-  if (currentState == STATE_REGISTERED)
-  {
-    showRegisteredRFID();
-
-    lcdClear();
-
-    lcdPrintLine(
-      0,
-      "SILAKAN NAIK"
-    );
-
-    lcdPrintLine(
-      1,
-      "Berat: --.-- kg"
-    );
-
-    lcdPrintLine(
-      2,
-      "Tunggu stabil..."
-    );
-
-    lcdPrintLine(
-      3,
-      "Jangan bergerak"
-    );
-
-    previousWeight = 0;
-    stableWeightStart = 0;
-    weightStable = false;
-
-    currentState =
-      STATE_WEIGHING;
-
-    return;
-  }
-
-  // ===========================================================
-  // MENIMBANG
-  // ===========================================================
-
-  if (currentState == STATE_WEIGHING)
-  {
-    if (processWeight())
-    {
-      finalWeight =
-        stableWeight;
-
-      currentState =
-        STATE_WEIGHT_LOCK;
-
-      stateStartTime =
-        millis();
-    }
-
-    return;
-  }
-
-  // ===========================================================
-  // BERAT LOCK
-  // ===========================================================
-
-  if (currentState == STATE_WEIGHT_LOCK)
-  {
-    showWeightLock();
-
-    resetHeightBuffer();
-
-    lcdClear();
-
-    lcdPrintLine(
-      0,
-      "PENGUKURAN TINGGI"
-    );
-
-    lcdPrintLine(
-      1,
-      "Tinggi: --.-- cm"
-    );
-
-    lcdPrintLine(
-      2,
-      "Berdiri tegak"
-    );
-
-    lcdPrintLine(
-      3,
-      "Menunggu stabil..."
-    );
-
-    delay(500);
-
-    currentState =
-      STATE_HEIGHT_MEASURING;
-
-    return;
-  }
-
-  // ===========================================================
-  // PENGUKURAN TINGGI
-  // ===========================================================
-
-  if (
-    currentState ==
-    STATE_HEIGHT_MEASURING
-  )
-  {
-    if (processHeight())
-    {
-      finalHeight =
-        stableHeight;
-
-      Serial.println();
-      Serial.println(
-        "TINGGI TERKUNCI"
-      );
-
-      Serial.print(
-        "Tinggi presisi: "
-      );
-
-      Serial.print(
-        finalHeight,
-        2
-      );
-
-      Serial.println(
-        " cm"
-      );
-
-      beepHeightLocked();
-
-      lcdClear();
-
-      lcdPrintLine(
-        0,
-        "TINGGI TERKUNCI"
-      );
-
-      lcdPrintLine(
-        1,
-        "Tinggi: " +
-        String(finalHeight, 2) +
-        " cm"
-      );
-
-      lcdPrintLine(
-        2,
-        "Menghitung TB/U"
-      );
-
-      lcdPrintLine(
-        3,
-        "Mohon tunggu..."
-
-      );
-
-      delay(1500);
-
-      // Kirim ke API
-      bool success =
-        sendMeasurement();
-
-      if (!success)
-      {
-        lcdClear();
-
-        lcdPrintLine(
-          0,
-          "GAGAL KIRIM DATA"
-        );
-
-        beepError();
-
-        lcdPrintLine(
-          1,
-          "Periksa WiFi/API"
-        );
-
-        delay(3000);
-
-        currentState =
-          STATE_STANDBY;
-
-        showStandby();
-
-        return;
-      }
-
-      currentState =
-        STATE_RESULT_Z;
-    }
-
-    return;
-  }
-
-  // ===========================================================
-  // HASIL Z-SCORE
-  // ===========================================================
-
-  if (
-    currentState ==
-    STATE_RESULT_Z
-  )
-  {
-    showZScoreResult();
-
-    currentState =
-      STATE_RESULT_ALL;
-
-    return;
-  }
-
-  // ===========================================================
-  // HASIL KESELURUHAN
-  // ===========================================================
-
-  if (
-    currentState ==
-    STATE_RESULT_ALL
-  )
-  {
-    showAllResultPage1();
-
-    delay(500);
-
-    showAllResultPage2();
-
-    currentState =
-      STATE_FINISH;
-
-    showFinish();
-
-    return;
-  }
-
-  // ===========================================================
-  // SELESAI
-  // ===========================================================
-
-  if (
-    currentState ==
-    STATE_FINISH
-  )
-  {
-    // Tunggu sampai anak turun
-    // dari timbangan.
-
-    if (isWeightEmpty())
-    {
-      delay(1000);
-
-      // Pastikan benar-benar kosong
-      if (isWeightEmpty())
-      {
-        Serial.println(
-          "Anak sudah turun"
-        );
-
-        currentUID = "";
-
-        childName = "";
-        childSex = "";
-        childAgeMonth = 0;
-
-        finalWeight = 0;
-        finalHeight = 0;
-        finalZScore = 0;
-
-        finalCategory = "";
-
-        previousWeight = 0;
-        previousHeight = 0;
-
-        stableWeight = 0;
-        stableHeight = 0;
-
-        stableWeightStart = 0;
-        stableHeightStart = 0;
-
-        weightStable = false;
-        heightStable = false;
-
-        currentState =
-          STATE_STANDBY;
-
-        showStandby();
-      }
-    }
-
-    return;
-  }
+  checkRFIDHealth();
+  idleNetwork();
 }
